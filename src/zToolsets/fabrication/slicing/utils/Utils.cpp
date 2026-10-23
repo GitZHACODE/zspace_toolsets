@@ -701,7 +701,8 @@ ZSPACE_INLINE bool parameterizeGraph(const zObjGraph &inGraph, zObjMesh &inMesh,
   for (size_t i = 0; i < numGraphVerts; i++) {
     const zPoint &P = graphPositions[i];
     const auto pointFailure = [&](const std::string &reason) {
-      return fail(reason);
+      return fail("vertex " + std::to_string(i) + " (" + std::to_string(P.x) +
+          ", " + std::to_string(P.y) + ", " + std::to_string(P.z) + "): " + reason);
     };
     if (!std::isfinite(P.x) || !std::isfinite(P.y) || !std::isfinite(P.z)) {
       return pointFailure("NonFinitePoint");
@@ -847,7 +848,8 @@ ZSPACE_INLINE bool realizeParameterGraph(const ParameterGraph &inParams,
                                          zObjGraph &outGraph,
                                          zVectorArray *outNormals,
                                          const zFloatArray *vertexHeights,
-                                         zFloatArray *outHeights) {
+                                         zFloatArray *outHeights,
+                                         const zVectorArray *vertexNormals) {
   if (inParams.empty())
     return false;
 
@@ -865,6 +867,8 @@ ZSPACE_INLINE bool realizeParameterGraph(const ParameterGraph &inParams,
     outHeights->assign(numVerts, 0.0f);
 
   const size_t numMeshVerts = targetPositions.size();
+  const bool smoothNormals = vertexNormals && !vertexNormals->empty();
+  if (smoothNormals && vertexNormals->size() != numMeshVerts) return false;
   const bool wantHeights = vertexHeights && outHeights;
 
   for (size_t i = 0; i < numVerts; i++) {
@@ -898,6 +902,16 @@ ZSPACE_INLINE bool realizeParameterGraph(const ParameterGraph &inParams,
       zVector e0 = vecSub(p1, p0);
       zVector e1 = vecSub(p2, p0);
       zVector norm = vecCross(e0, e1);
+      if (smoothNormals) {
+        const zVector &n0 = (*vertexNormals)[bv.v0], &n1 = (*vertexNormals)[bv.v1],
+                      &n2 = (*vertexNormals)[bv.v2];
+        zVector interpolated(n0.x*bv.u+n1.x*bv.v+n2.x*bv.w,
+                                  n0.y*bv.u+n1.y*bv.v+n2.y*bv.w,
+                                  n0.z*bv.u+n1.z*bv.v+n2.z*bv.w);
+        if (!std::isfinite(interpolated.x) || !std::isfinite(interpolated.y) ||
+            !std::isfinite(interpolated.z) || interpolated.length() <= 1e-6) return false;
+        norm = interpolated;
+      }
       if (norm.length() > 1e-6)
         norm.normalize();
       else
@@ -918,7 +932,8 @@ ZSPACE_INLINE bool remapGraph(zObjGraph &graph, zObjMesh &inMesh2D,
                               zObjMesh &projectionMesh3D,
                               zVectorArray *mappedNormals,
                               const zFloatArray *vertexHeights,
-                              zFloatArray *mappedHeights, std::string *outError) {
+                              zFloatArray *mappedHeights, std::string *outError,
+                              const zVectorArray *vertexNormals) {
   if (outError) outError->clear();
   ParameterGraph tempParams;
   zIntArray sourceConnects, sourceCounts, targetConnects, targetCounts;
@@ -935,7 +950,7 @@ ZSPACE_INLINE bool remapGraph(zObjGraph &graph, zObjMesh &inMesh2D,
                           outError ? &diagnosticPositions : nullptr))
     return false;
   if (!realizeParameterGraph(tempParams, projectionMesh3D, graph,
-                              mappedNormals, vertexHeights, mappedHeights)) {
+                               mappedNormals, vertexHeights, mappedHeights, vertexNormals)) {
     if (outError) *outError = "RealizationFailed: empty target, invalid vertex index or non-finite 3D position";
     return false;
   }

@@ -69,11 +69,14 @@ ZSPACE_INLINE bool HarmonicSlicer::computeVertexLayerHeights(int numLayers, zFlo
 
 ZSPACE_INLINE int HarmonicSlicer::crossingVertex(int a, int b, float iso,
     const zFloatArray &vertexHeights, ContourData &slice) {
-  const float aPhi = static_cast<float>(_Tet.UVW[a].z);
-  const float bPhi = static_cast<float>(_Tet.UVW[b].z);
-  const float denominator = bPhi - aPhi;
-  const float t = (std::fabs(denominator) < 1e-8f) ? 0.5f : (iso - aPhi) / denominator;
-  const float tc = std::clamp(t, 0.0f, 1.0f);
+  // Classify and interpolate with the same precision as the nodal field.
+  // Rounding phi/t to float can collapse two distinct edge intersections onto
+  // one endpoint, discard a triangle and leave an untagged hairline boundary.
+  const double aPhi = _Tet.UVW[a].z;
+  const double bPhi = _Tet.UVW[b].z;
+  const double denominator = bPhi - aPhi;
+  const double t = denominator == 0 ? 0.5 : (iso - aPhi) / denominator;
+  const double tc = std::clamp(t, 0.0, 1.0);
   const int sourceA = tc == 1.0f ? b : a;
   const int sourceB = tc == 0.0f ? a : b;
   const unsigned long long key = makeEdgeKey(sourceA, sourceB);
@@ -127,7 +130,7 @@ ZSPACE_INLINE void HarmonicSlicer::extractIsoMesh(float iso, zObjMesh &mesh, zPo
     std::array<int, 4> inside{}, outside{};
     int insideCount = 0, outsideCount = 0;
     for (int localId = 0; localId < 4; ++localId) {
-      if (static_cast<float>(_Tet.UVW[tet[localId]].z) < iso) inside[insideCount++] = tet[localId];
+      if (_Tet.UVW[tet[localId]].z < iso) inside[insideCount++] = tet[localId];
       else outside[outsideCount++] = tet[localId];
     }
     if (insideCount == 0 || outsideCount == 0) continue;
@@ -186,9 +189,14 @@ ZSPACE_INLINE void HarmonicSlicer::extractCapMesh(VertexTag tag, zObjMesh &mesh,
     if (_Tet.FaceTags[faceId] != faceTag) continue;
     const auto &tri = face.VertexIds;
     const bool valid = std::all_of(tri.begin(), tri.end(), [&](int id) {
-      return id >= 0 && static_cast<size_t>(id) < _Tet.UVWValid.size() && _Tet.UVWValid[id];
+      return id >= 0 && static_cast<size_t>(id) < _Tet.UVW.size() &&
+          static_cast<size_t>(id) < _Tet.Surface.Positions.size() &&
+          toEigenVec(_Tet.Surface.Positions[id]).allFinite();
     });
-    if (!valid) continue; // Validate the entire triangle before adding any vertices.
+    // UV trace validity is independent of cap geometry. Removing a valid
+    // cap face here opens holes when refinement adds a failed UV trace;
+    // unrollIsoMesh already falls back to planar projection for invalid UVs.
+    if (!valid) continue;
 
     std::array<int, 3> localTri{};
     for (int local = 0; local < 3; ++local) {
@@ -561,6 +569,20 @@ ZSPACE_INLINE bool HarmonicSlicer::computeContours(bool useParallel) {
         extractIsoMesh(iso, o_IsoMeshes[k], o_IsoMeshUV[k], vertexHeights, o_VertexLayerHeights[k],
                        lookup, _HarmonicIsoEdgeWidthIds[k], layerDebug[k]);
       }
+    } catch (...) { parallelErrors1.capture(k); }
+  }
+  parallelErrors1.rethrow();
+  std::string relaxationError;
+  if (!relaxContours(relaxationError, useParallel)) {
+    clearContours();
+    _Status = "computeContours failed: iso relaxation: " + relaxationError;
+    printDebug("[computeContours] " + _Status);
+    return false;
+  }
+  zTsDetail::ParallelErrors parallelUnroll(numLayers);
+  #pragma omp parallel for schedule(dynamic) if(useParallel)
+  for (int k = 0; k < numLayers; ++k) {
+    try {
       zPointArray positions3D, positions2D;
       if (unrollIsoMesh(o_IsoMeshes[k], o_IsoMeshUV[k], o_IsoMeshes2D[k],
                          positions3D, positions2D)) {
@@ -614,9 +636,9 @@ ZSPACE_INLINE bool HarmonicSlicer::computeContours(bool useParallel) {
       if (usablePaths == 0)
         layerDebug[k].push_back(tag + " NoUsableBoundaryPath: no simple closed loop or open chain" +
                      (generated[k] ? std::string(".") : std::string("; no usable unfolded mesh.")));
-    } catch (...) { parallelErrors1.capture(k); }
+    } catch (...) { parallelUnroll.capture(k); }
   }
-  parallelErrors1.rethrow();
+  parallelUnroll.rethrow();
 
   // Workers only append to their own layer. Print serially in zero-based layer order.
   for (int k = 0; k < numLayers; ++k) {

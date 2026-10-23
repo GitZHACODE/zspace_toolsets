@@ -1334,7 +1334,7 @@ ZSPACE_INLINE bool extractPrintPaths(const zObjMeshScalarField &fieldGrid,
 
 ZSPACE_INLINE bool mapPrintPaths(const std::vector<PrintPath> &paths2D,
     zObjMesh &chart2D, zObjMesh &mesh3D, const zFloatArray *vertexHeights,
-    std::vector<PrintPath> &outPaths3D, int layer) {
+    std::vector<PrintPath> &outPaths3D, int layer, const zVectorArray *vertexNormals) {
   outPaths3D = paths2D;
   const zFloatArray emptyHeights;
   if (!vertexHeights) vertexHeights = &emptyHeights;
@@ -1343,7 +1343,7 @@ ZSPACE_INLINE bool mapPrintPaths(const std::vector<PrintPath> &paths2D,
     auto &path = outPaths3D[i];
     std::string reason;
     if (!remapGraph(path.graph, chart2D, mesh3D, &path.normals,
-                    vertexHeights, &path.heights, &reason)) {
+                    vertexHeights, &path.heights, &reason, vertexNormals)) {
       printDebug("[mapPrintPaths] " + (layer >= 0 ? "layer=" + std::to_string(layer) + " " : std::string()) + reason);
       path = PrintPath();
       success = false;

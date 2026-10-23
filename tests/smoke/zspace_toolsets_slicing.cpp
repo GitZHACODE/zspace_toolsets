@@ -1,11 +1,14 @@
 #include <zspace/slicing.h>
 #include <zspace/toolsets.h>
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 using namespace zSpace;
 
@@ -45,7 +48,7 @@ void configure(zTsSlicing& session, zObjectMesh& mesh) {
 }
 
 void checkPaths(const PrintPathArray& layers) {
-  require(layers.size() == 5, "Expected five layers for height 2 and spacing 0.5");
+  require(layers.size() == 4, "Expected four printable layers; exact top cap must be omitted");
   for (const auto& layer : layers) {
     require(!layer.empty(), "Empty print-path layer");
     for (const auto& path : layer) {
@@ -181,6 +184,90 @@ void parallelParity() {
   }
 }
 
+void tetRefinement() {
+#ifdef ZSPACE_TOOLSETS_WITH_TETGEN
+  auto mesh = block();
+  zPointArray original;
+  zIntArray faces, counts;
+  zFnMesh(mesh).getVertexPositions(original);
+  zFnMesh(mesh).getPolygonData(faces, counts);
+  std::vector<std::array<int,3>> triangles;
+  int cursor = 0;
+  for (int count : counts) {
+    for (int i = 1; i + 1 < count; ++i)
+      triangles.push_back({faces[cursor], faces[cursor+i], faces[cursor+i+1]});
+    cursor += count;
+  }
+  const double sourceEdge = zTsUtils::meanEdgeLength(original, triangles);
+  size_t coarseCount = 0;
+  require(SlicerSettings{}._HTetEdgeLengthScale == 0.5, "Unexpected default tet refinement");
+  for (double scale : {1.0, 0.75, 0.5}) {
+    zTsSlicing session;
+    configure(session, mesh);
+    session.setSlicerMode(zTsSlicerMode::Harmonic);
+    session.getSettings()._HTetEdgeLengthScale = scale;
+    require(session.computeSlicer(false), session.getStatus());
+    const auto &tet = session.getHarmonicSlicer()->getTetVolume();
+    const double targetEdge = sourceEdge * scale;
+    const double limit = targetEdge*targetEdge*targetEdge / (6*std::sqrt(2.0));
+    double maximum = 0;
+    for (const auto &element : tet.Volumes) if (element.Valid) {
+      require(std::isfinite(element.Volume) && element.Volume > 0, "Invalid refined tetrahedron");
+      maximum = (std::max)(maximum, element.Volume);
+    }
+    if (scale == 1) coarseCount = tet.Volumes.size();
+    if (scale == 0.5) require(tet.Volumes.size() > coarseCount, "Refinement did not increase tet density");
+    std::cout << "Tet edge scale=" << scale << ", count=" << tet.Volumes.size()
+        << ", maximum volume=" << maximum << ", target volume=" << limit << '\n';
+    require(maximum <= limit*(1+1e-5), "TetGen exceeded the requested volume bound");
+    for (const auto &vertex : tet.Vertices) {
+      const auto &p = vertex.Position;
+      require(p.x >= -1e-6 && p.x <= 4+1e-6 && p.y >= -1e-6 && p.y <= 4+1e-6 &&
+          p.z >= -1e-6 && p.z <= 2+1e-6, "Tet refinement changed the source domain");
+    }
+    require(session.getHarmonicSlicer()->getIsoMeshes().size() == 5 && session.getSettings().LayerSpacing == 0.5f &&
+        session.getSettings().FieldCellSize == 0.1f && session.getPrintSynSetting().ResampleLength == 0.2f,
+        "Tet refinement changed unrelated slicing settings");
+  }
+  zPointArray after;
+  zIntArray afterFaces, afterCounts;
+  zFnMesh(mesh).getVertexPositions(after);
+  zFnMesh(mesh).getPolygonData(afterFaces, afterCounts);
+  require(after.size() == original.size() && afterFaces == faces && afterCounts == counts,
+      "Input surface topology was modified");
+  for (size_t i = 0; i < after.size(); ++i)
+    require(zTsUtils::vecDistSq(after[i], original[i]) == 0, "Input surface vertices moved");
+
+  zTsSlicing invalid;
+  configure(invalid, mesh);
+  invalid.setSlicerMode(zTsSlicerMode::Harmonic);
+  require(invalid.computeSlicer(false), invalid.getStatus());
+  // A failed UV trace does not invalidate a geometrically valid cap face.
+  auto *slicer = invalid.getHarmonicSlicer();
+  auto &tet = const_cast<HarmonicField &>(slicer->getTetVolume());
+  int topFaces = 0, failedVertex = -1;
+  for (size_t f = 0; f < tet.Faces.size(); ++f)
+    if (tet.FaceTags[f] == HarmonicField::TetFaceTag::Top) {
+      ++topFaces; failedVertex = tet.Faces[f].VertexIds[0];
+    }
+  require(topFaces > 0 && failedVertex >= 0, "No cap for UV-failure regression");
+  tet.UVWValid[failedVertex] = false;
+  tet.UVW[failedVertex].x = tet.UVW[failedVertex].y = std::numeric_limits<float>::quiet_NaN();
+  require(slicer->computeContours(false), "Failed UV trace removed valid cap geometry");
+  require(zFnMesh(slicer->getIsoMeshes().back()).numPolygons() == topFaces,
+      "Cap triangles were discarded solely because UV tracing failed");
+  require(slicer->computeField(false), "Failed UV trace prevented planar cap unfolding");
+  require(invalid.computePostProcess(false), invalid.getStatus());
+  for (double scale : {0.0, -1.0, 1.1, std::numeric_limits<double>::quiet_NaN(),
+       std::numeric_limits<double>::infinity(), 1e-200}) {
+    invalid.getSettings()._HTetEdgeLengthScale = scale;
+    require(!invalid.computeSlicer(false), "Invalid tet edge-size scale accepted");
+    require(invalid.getHarmonicSlicer()->getTetVolume().Volumes.empty() && invalid.get3DPrintPaths().empty(),
+        "Invalid tet refinement retained stale results");
+  }
+#endif
+}
+
 void harmonic() {
 #ifdef ZSPACE_TOOLSETS_WITH_TETGEN
   auto mesh = block();
@@ -279,9 +366,13 @@ void harmonic() {
   rotated.getSettings().FieldCellSize = 0.2f;
   rotated.setSlicerMode(zTsSlicerMode::Harmonic);
   require(rotated.computeSlicer(false), rotated.getStatus());
+  size_t rotationLayer=0;
   for (const auto &layer : rotated.getHarmonicSlicer()->getVertexLayerHeights()) {
     require(!layer.empty(), "Missing rotated section heights");
-    for (float h : layer) require(std::abs(h - 1.0) < 2e-4, "Harmonic height depends on world Z or requested spacing");
+    for (size_t i=0;i<layer.size();++i) {float h=layer[i];
+      require(std::abs(h - 1.0) < 2e-4, "Incorrect rotated harmonic height on layer " + std::to_string(rotationLayer) +
+          ", vertex " + std::to_string(i) + ": " + std::to_string(h));}
+    ++rotationLayer;
   }
 
   auto tapered = block();
@@ -331,6 +422,7 @@ int main(int argc, char** argv) {
     else if (test == "features") features();
     else if (test == "parallel") parallelParity();
     else if (test == "harmonic") harmonic();
+    else if (test == "tet_refinement") tetRefinement();
     else throw std::runtime_error("Unknown test case");
     return 0;
   } catch (const std::exception& error) {

@@ -368,15 +368,18 @@ ZSPACE_INLINE bool HarmonicSlicer::computePrintPathImpl(bool useParallel) {
       return false;
     }
   }
-  o_PrintPaths2D.resize(n);
-  o_PrintPaths3D.resize(n);
+  // Retain the fixed top reference mesh, but omit the coincident print layer.
+  const int printedLayers=n-1;
+  if(printedLayers<1){_Status="failed: no printable layers below the top cap.";return false;}
+  o_PrintPaths2D.resize(printedLayers);
+  o_PrintPaths3D.resize(printedLayers);
   std::vector<char> failed(n, 0);
   std::vector<std::vector<std::string>> pathDebug(n);
   // Flush any lazy face-list synchronization before workers share the grid.
   (void)zFnMesh(o_ScalarField).numVertices();
   zTsDetail::ParallelErrors parallelErrors3(n);
 #pragma omp parallel for schedule(dynamic) if(useParallel)
-  for (int k = 0; k < n; ++k) {
+  for (int k = 0; k < printedLayers; ++k) {
     try {
       if (!zTsField::extractPrintPaths(o_ScalarField, o_PathFields[k], o_WidthFields[k],
                                       o_TrackFields[k], o_PrintPaths2D[k], k, &pathDebug[k])) {
@@ -384,7 +387,8 @@ ZSPACE_INLINE bool HarmonicSlicer::computePrintPathImpl(bool useParallel) {
         continue;
       }
       if (!zTsField::mapPrintPaths(o_PrintPaths2D[k], o_IsoMeshes2D[k], o_IsoMeshes[k],
-                                  &o_VertexLayerHeights[k], o_PrintPaths3D[k], k)) failed[k] = 1;
+                                  &o_VertexLayerHeights[k], o_PrintPaths3D[k], k,
+                                  &o_VertexLayerNormals[k])) failed[k] = 1;
     } catch (...) { parallelErrors3.capture(k); }
   }
   parallelErrors3.rethrow();

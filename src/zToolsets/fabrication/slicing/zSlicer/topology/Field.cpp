@@ -330,15 +330,18 @@ ZSPACE_INLINE bool TopologySlicer::computePrintPathImpl(bool useParallel) {
     zTsUtils::printDebug("[computePrintPathImpl] " + _Status);
     return false;
   }
-  o_PrintPaths2D.resize(n);
-  o_PrintPaths3D.resize(n);
+  // Keep the exact top mesh as a slicing/reference constraint, not a print layer.
+  const int printedLayers=n-1;
+  if(printedLayers<1){_Status="failed: no printable layers below the top cap.";return false;}
+  o_PrintPaths2D.resize(printedLayers);
+  o_PrintPaths3D.resize(printedLayers);
   std::vector<char> failed(n, 0);
   std::vector<std::vector<std::string>> pathDebug(n);
   // Flush any lazy face-list synchronization before workers share the grid.
   (void)zFnMesh(o_ScalarField).numVertices();
   zTsDetail::ParallelErrors parallelErrors2(n);
 #pragma omp parallel for schedule(dynamic) if(useParallel)
-  for (int k = 0; k < n; ++k) {
+  for (int k = 0; k < printedLayers; ++k) {
     try {
       if (!zTsField::extractPrintPaths(o_ScalarField, o_PathFields[k], o_WidthFields[k],
                                       o_TrackFields[k], o_PrintPaths2D[k], k, &pathDebug[k])) {

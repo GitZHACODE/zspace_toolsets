@@ -120,6 +120,17 @@ struct SlicerSettings {
   // from the face width groups.
 
   //---- Harmonic only (HarmonicSlicer)
+  // Tetrahedral target edge length relative to the input surface's mean
+  // triangle edge. Must be finite and in (0,1]. 1 restores the original
+  // density; 0.5 refines the volume without modifying the input mesh.
+  double _HTetEdgeLengthScale = 0.5;
+  // Constrained relaxation of intermediate harmonic layers before unrolling.
+  // Caps remain fixed; boundary vertices slide on their input side patches.
+  // 0 iterations retains the original geometry, height and face-normal path.
+  int _HIsoRelaxIterations = 8;
+  double _HIsoRelaxStrength = 0.25; // finite (0,1]
+  // Model units; 0 uses a limit derived from neighbouring-layer separation.
+  double _HIsoRelaxMaxDeviation = 0.0;
   // Maximum Euler tracing step as a fraction of the current simplex's
   // minimum altitude (volume and wall traces). Must be in (0, 1].
   double _HTraceStepFraction = 0.2;
@@ -164,6 +175,7 @@ struct ParameterGraph {
  * zPrintSyn.
  */
 struct PrintPath {
+  enum Feature { AngleFeature = 1, IntersectionFeature = 2 };
   zObjGraph graph;
   zFloatArray widths;
   zFloatArray heights;
@@ -172,6 +184,9 @@ struct PrintPath {
   // zPrintSyn::extractTrackPaths for a double-layer boundary ring; empty
   // for a single-perimeter path (no inner/outer distinction).
   zFloatArray trackIds;
+  // Optional per-vertex bit mask. Empty means no recorded features. Once
+  // populated, stays parallel to graph vertices through all PrintSyn stages.
+  zIntArray featureFlags;
 };
 
 // Print paths per layer: [layer][path], as produced by the zPrintSyn
@@ -347,7 +362,8 @@ ZSPACE_TOOLSETS bool realizeParameterGraph(const ParameterGraph &inParams, zObjM
                            zObjGraph &outGraph,
                            zVectorArray *outNormals = nullptr,
                            const zFloatArray *vertexScalars = nullptr,
-                           zFloatArray *outHeights = nullptr);
+                           zFloatArray *outHeights = nullptr,
+                           const zVectorArray *vertexNormals = nullptr);
 
 //---- Barycentric Mesh-to-Mesh Graph Projection
 
@@ -355,7 +371,8 @@ ZSPACE_TOOLSETS bool remapGraph(zObjGraph &graph, zObjMesh &inMesh2D,
                 zObjMesh &projectionMesh3D,
                 zVectorArray *mappedNormals = nullptr,
                 const zFloatArray *vertexHeights = nullptr,
-                zFloatArray *mappedHeights = nullptr, std::string *outError = nullptr);
+                zFloatArray *mappedHeights = nullptr, std::string *outError = nullptr,
+                const zVectorArray *vertexNormals = nullptr);
 
 //---- Barycentric Point Transfer (shared by both slicer operators and zPrintSyn)
 
@@ -683,7 +700,8 @@ ZSPACE_TOOLSETS bool extractPrintPaths(const zObjMeshScalarField &fieldGrid,
     std::vector<std::string> *debug = nullptr);
 ZSPACE_TOOLSETS bool mapPrintPaths(const std::vector<PrintPath> &paths2D,
     zObjMesh &chart2D, zObjMesh &mesh3D, const zFloatArray *vertexHeights,
-    std::vector<PrintPath> &outPaths3D, int layer = -1);
+    std::vector<PrintPath> &outPaths3D, int layer = -1,
+    const zVectorArray *vertexNormals = nullptr);
 
 ZSPACE_TOOLSETS void extractRawIsoContour(const zObjMeshScalarField &field,
                           const zScalarArray &pathVals,

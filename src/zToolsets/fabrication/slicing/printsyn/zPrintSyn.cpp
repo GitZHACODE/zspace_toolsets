@@ -71,10 +71,13 @@ void detectFeatureAngles(const zPointArray &positions,
       continue;
     }
 
-    double angleRad;
-    if (turnAngleAt(positions[prevId], positions[curId], positions[nextId],
-                    angleRad) &&
-        angleRad < thresholdRad) {
+    // Features on short edges are still features. turnAngleAt's 1e-3
+    // physical cutoff is unsuitable here; reject only coincident edges.
+    const Eigen::Vector3d a = toEigenVec(positions[prevId]) - toEigenVec(positions[curId]);
+    const Eigen::Vector3d b = toEigenVec(positions[nextId]) - toEigenVec(positions[curId]);
+    const double product = a.norm() * b.norm();
+    if (product > 0.0 && std::isfinite(product) &&
+        std::acos((std::max)(-1.0, (std::min)(1.0, a.dot(b) / product))) < thresholdRad) {
       outFeatureFlags[curId] = 1;
     }
   }
@@ -93,6 +96,11 @@ bool resampleSinglePath(PrintPath &ioPath, float resampleLength,
   const float sampleLength = resampleLength;
   if (N < 2)
     return false;
+  if ((!ioPath.widths.empty() && ioPath.widths.size() != size_t(N)) ||
+      (!ioPath.heights.empty() && ioPath.heights.size() != size_t(N)) ||
+      (!ioPath.normals.empty() && ioPath.normals.size() != size_t(N)) ||
+      (!ioPath.trackIds.empty() && ioPath.trackIds.size() != size_t(N)) ||
+      (!ioPath.featureFlags.empty() && ioPath.featureFlags.size() != size_t(N))) return false;
 
   std::vector<GraphPolyline> curves;
   if (!graphPolylines(ioPath.graph, curves) || curves.size() != 1 ||
@@ -101,11 +109,18 @@ bool resampleSinglePath(PrintPath &ioPath, float resampleLength,
 
   zPointArray positions;
   fnGraph.getVertexPositions(positions);
+  for (const auto &p : positions)
+    if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) return false;
 
   const zIntArray &sequence = curves[0].Vertices;
 
   std::vector<int> featureFlags;
   detectFeatureAngles(positions, sequence, featureAngleTol, closed, featureFlags);
+  for (int i = 0; i < N; ++i) {
+    // Open endpoints are mandatory, but are not angle features.
+    if (!closed && (i == sequence.front() || i == sequence.back())) featureFlags[i] = 0;
+    if (!ioPath.featureFlags.empty()) featureFlags[i] |= ioPath.featureFlags[i];
+  }
 
   const zFloatArray &weights = ioPath.widths;
   const zFloatArray &heights = ioPath.heights;
@@ -121,13 +136,30 @@ bool resampleSinglePath(PrintPath &ioPath, float resampleLength,
   zVectorArray outNormals;
   zFloatArray outTrackIds;
   zIntArray outEdges;
+  zIntArray outFeatures;
+  std::vector<char> outRequired;
+
+  const auto popPoint = [&]() {
+    outPoints.pop_back(); outWeights.pop_back();
+    if (hasHeights) outHeights.pop_back();
+    if (hasNormals) outNormals.pop_back();
+    if (hasTrackIds) outTrackIds.pop_back();
+    outFeatures.pop_back(); outRequired.pop_back();
+  };
 
   auto appendPoint = [&](const zPoint &p, float w, float h, const zVector &nrm,
-                         float trk) {
+                          float trk, int features, bool required) {
+    // A nearby ordinary sample yields to an exact feature/endpoint. Distinct
+    // required points never weld, however short the edge between them is.
+    const double clearance = (std::min)(0.01, double(sampleLength) * 0.1);
+    while (required && !outPoints.empty() && !outRequired.back() &&
+           vecDistSq(p, outPoints.back()) < clearance * clearance) popPoint();
     if (!outPoints.empty()) {
-      zVector d = vecSub(p, outPoints.back());
-      if (d.length() < 1e-2)
+      if (vecDistSq(p, outPoints.back()) == 0.0) {
+        outFeatures.back() |= features;
+        outRequired.back() |= required;
         return;
+      }
     }
     outPoints.push_back(p);
     outWeights.push_back(w);
@@ -137,6 +169,8 @@ bool resampleSinglePath(PrintPath &ioPath, float resampleLength,
       outNormals.push_back(nrm);
     if (hasTrackIds)
       outTrackIds.push_back(trk);
+    outFeatures.push_back(features);
+    outRequired.push_back(required);
   };
 
   auto weightAt = [&](int id) {
@@ -162,7 +196,7 @@ bool resampleSinglePath(PrintPath &ioPath, float resampleLength,
   // Emit the path's start vertex and reset the sampling phase there.
   const int firstId = sequence[0];
   appendPoint(positions[firstId], weightAt(firstId), heightAt(firstId),
-              normalAt(firstId), trackAt(firstId));
+              normalAt(firstId), trackAt(firstId), featureFlags[firstId], true);
   double distSinceSample = 0.0;
 
   for (int seg = 0; seg < numSegments; seg++) {
@@ -178,7 +212,7 @@ bool resampleSinglePath(PrintPath &ioPath, float resampleLength,
     zVector segVec = vecSub(p1, p0);
     const double segLen = segVec.length();
 
-    if (segLen > 1e-6) {
+    if (segLen > 0.0) {
       // March along this segment, continuing the running phase carried
       // over from previous segments, placing one sample every
       // sampleLength regardless of how long/short this segment is.
@@ -197,7 +231,7 @@ bool resampleSinglePath(PrintPath &ioPath, float resampleLength,
           interpN = zVector(0, 0, 1);
         const float interpTrk =
             (trk0 + t * (trk1 - trk0)) >= 0.5f ? 1.0f : 0.0f;
-        appendPoint(interpP, interpW, interpH, interpN, interpTrk);
+        appendPoint(interpP, interpW, interpH, interpN, interpTrk, 0, false);
         remaining += sampleLength;
       }
       distSinceSample = segLen - (remaining - sampleLength);
@@ -208,12 +242,23 @@ bool resampleSinglePath(PrintPath &ioPath, float resampleLength,
     const bool isLastOpenVertex = (!closed && seg == numSegments - 1);
     const bool isFeature =
         (i1 < int(featureFlags.size())) && featureFlags[i1] != 0;
-    if (isLastOpenVertex || isFeature) {
-      appendPoint(p1, w1, h1, n1, trk1);
+    if ((isLastOpenVertex || isFeature) && !(closed && i1 == firstId)) {
+      appendPoint(p1, w1, h1, n1, trk1, featureFlags[i1], true);
       distSinceSample = 0.0;
     }
   }
 
+  // Ordinary closing samples yield to the required start, including tiny
+  // numerical residuals after a whole number of sample intervals. Required
+  // closing features never participate in the old 0.1 mm closure weld.
+  const double closingClearance = (std::min)(0.01, double(sampleLength) * 0.1);
+  while (closed && outPoints.size() > 1 && !outRequired.back() &&
+         vecDistSq(outPoints.front(), outPoints.back()) < closingClearance * closingClearance)
+    popPoint();
+  if (closed && outPoints.size() > 1 && vecDistSq(outPoints.front(), outPoints.back()) == 0.0) {
+    outFeatures.front() |= outFeatures.back();
+    popPoint();
+  }
   const int numPts = static_cast<int>(outPoints.size());
   if (numPts >= 2) {
     for (int i = 0; i + 1 < numPts; i++) {
@@ -221,19 +266,6 @@ bool resampleSinglePath(PrintPath &ioPath, float resampleLength,
       outEdges.push_back(i + 1);
     }
     if (closed && numPts >= 3) {
-      zVector d = vecSub(outPoints.back(), outPoints.front());
-      if (d.length() < 0.1) {
-        outPoints.pop_back();
-        outWeights.pop_back();
-        if (hasHeights)
-          outHeights.pop_back();
-        if (hasNormals)
-          outNormals.pop_back();
-        if (hasTrackIds)
-          outTrackIds.pop_back();
-        outEdges.pop_back();
-        outEdges.pop_back();
-      }
       const int finalN = static_cast<int>(outPoints.size());
       if (finalN >= 3) {
         outEdges.push_back(finalN - 1);
@@ -242,12 +274,13 @@ bool resampleSinglePath(PrintPath &ioPath, float resampleLength,
     }
   }
 
-  if (outPoints.size() < 3 || outEdges.size() < 4)
+  if (outPoints.size() < (closed ? 3u : 2u) || outEdges.size() < (closed ? 6u : 2u))
     return false;
 
   fnGraph.clear();
   fnGraph.create(outPoints, outEdges);
   ioPath.widths = outWeights;
+  ioPath.featureFlags = outFeatures;
   if (hasHeights)
     ioPath.heights = outHeights;
   if (hasNormals)
@@ -301,6 +334,8 @@ void reversePrintPath(PrintPath &ioPath) {
     std::reverse(ioPath.normals.begin(), ioPath.normals.end());
   if (!ioPath.trackIds.empty())
     std::reverse(ioPath.trackIds.begin(), ioPath.trackIds.end());
+  if (!ioPath.featureFlags.empty())
+    std::reverse(ioPath.featureFlags.begin(), ioPath.featureFlags.end());
 
   zIntArray newEdges;
   newEdges.reserve(numV * 2);
@@ -539,6 +574,7 @@ bool insertAndRotateToStart(PrintPath &ioPath, double s,
   zFloatArray newHeights = ioPath.heights;
   zVectorArray newNormals = ioPath.normals;
   zFloatArray newTrackIds = ioPath.trackIds;
+  zIntArray newFeatures = ioPath.featureFlags;
   int startIdx;
 
   const double tEps = weldEps / (std::max)(segLen, 1e-6);
@@ -597,6 +633,7 @@ bool insertAndRotateToStart(PrintPath &ioPath, double s,
       newNormals.insert(newNormals.begin() + i1, newN);
     if (hasTrackIds)
       newTrackIds.insert(newTrackIds.begin() + i1, newTrk);
+    if (!newFeatures.empty()) newFeatures.insert(newFeatures.begin() + i1, 0);
     startIdx = i1;
   }
 
@@ -612,6 +649,8 @@ bool insertAndRotateToStart(PrintPath &ioPath, double s,
   if (hasTrackIds)
     std::rotate(newTrackIds.begin(), newTrackIds.begin() + startIdx,
                 newTrackIds.end());
+  if (!newFeatures.empty())
+    std::rotate(newFeatures.begin(), newFeatures.begin() + startIdx, newFeatures.end());
 
   const int newN = static_cast<int>(newPositions.size());
   zIntArray newEdges;
@@ -626,6 +665,7 @@ bool insertAndRotateToStart(PrintPath &ioPath, double s,
   fnGraph.clear();
   fnGraph.create(newPositions, newEdges);
   ioPath.widths = newWidths;
+  ioPath.featureFlags = newFeatures;
   if (hasHeights)
     ioPath.heights = newHeights;
   if (hasNormals)
@@ -762,6 +802,7 @@ void cutGapBeforeStart(PrintPath &ioPath, double seamSize) {
   zFloatArray keptHeights;
   zVectorArray keptNormals;
   zFloatArray keptTrackIds;
+  zIntArray keptFeatures;
 
   auto appendIdx = [&](int id) {
     keptPositions.push_back(positions[id]);
@@ -776,6 +817,7 @@ void cutGapBeforeStart(PrintPath &ioPath, double seamSize) {
     if (hasTrackIds)
       keptTrackIds.push_back(
           id < int(ioPath.trackIds.size()) ? ioPath.trackIds[id] : 0.0f);
+    if (!ioPath.featureFlags.empty()) keptFeatures.push_back(ioPath.featureFlags[id]);
   };
 
   // Keep the surviving arc from the start (index 0) through i0, then
@@ -800,6 +842,7 @@ void cutGapBeforeStart(PrintPath &ioPath, double seamSize) {
         (i1 < int(ioPath.widths.size())) ? ioPath.widths[i1] : 0.04f;
     keptPositions.push_back(newP);
     keptWidths.push_back(static_cast<float>(w0 + t * (w1 - w0)));
+    if (!ioPath.featureFlags.empty()) keptFeatures.push_back(0);
     if (hasHeights) {
       const float h0 =
           (i0 < int(ioPath.heights.size())) ? ioPath.heights[i0] : 0.0f;
@@ -845,6 +888,14 @@ void cutGapBeforeStart(PrintPath &ioPath, double seamSize) {
   fnGraph.clear();
   fnGraph.create(keptPositions, newEdges);
   ioPath.widths = keptWidths;
+  const auto countFeatures = [](const zIntArray &flags) {
+    return std::count_if(flags.begin(), flags.end(), [](int flag) { return flag != 0; });
+  };
+  const auto removedFeatures = countFeatures(ioPath.featureFlags) - countFeatures(keptFeatures);
+  if (removedFeatures > 0)
+    zTsUtils::printDebug("[cutGapBeforeStart] Explicit seam gap removed " +
+        std::to_string(removedFeatures) + " feature vertices from the cut arc.");
+  ioPath.featureFlags = keptFeatures;
   if (hasHeights)
     ioPath.heights = keptHeights;
   if (hasNormals)
@@ -882,18 +933,32 @@ ZSPACE_INLINE bool zPrintSyn::reconstructCorners(PrintPath &path, float angleThr
   const int n = static_cast<int>(sequence.size());
   const bool closed = curves[0].Closed;
   if (n != static_cast<int>(points.size())) return false;
-  if (n < 5) return true;
+  for (const auto &p : points)
+    if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) return false;
   if ((!path.widths.empty() && path.widths.size() != points.size()) ||
       (!path.heights.empty() && path.heights.size() != points.size()) ||
       (!path.normals.empty() && path.normals.size() != points.size()) ||
-      (!path.trackIds.empty() && path.trackIds.size() != points.size())) return false;
+      (!path.trackIds.empty() && path.trackIds.size() != points.size()) ||
+      (!path.featureFlags.empty() && path.featureFlags.size() != points.size())) return false;
   std::vector<int> flags;
   detectFeatureAngles(points, sequence, angleThreshold, closed, flags);
   if (!closed) flags[sequence.front()] = flags[sequence.back()] = 0;
+  const zIntArray previousFeatures = path.featureFlags;
+  zIntArray recorded = previousFeatures;
+  if (recorded.empty()) recorded.assign(points.size(), 0);
+  for (int id = 0; id < n; ++id) {
+    recorded[id] |= flags[id];
+    // Features already reconstructed/recorded are anchors. A subsequent
+    // resampling call must not reconstruct them into a different corner.
+    if (!previousFeatures.empty() && previousFeatures[id]) flags[id] = 0;
+  }
+  path.featureFlags = recorded;
+  if (n < 5) return true;
   auto merged = flags;
   for (int i = 0; i < n; ++i) {
     if (!closed && (i == 0 || i == n-1)) continue;
-    if (flags[sequence[(i+n-1)%n]] && flags[sequence[(i+1)%n]])
+    if (flags[sequence[(i+n-1)%n]] && flags[sequence[(i+1)%n]] &&
+        (previousFeatures.empty() || !previousFeatures[sequence[i]]))
       merged[sequence[i]] = 1;
   }
   if (closed) {
@@ -906,8 +971,10 @@ ZSPACE_INLINE bool zPrintSyn::reconstructCorners(PrintPath &path, float angleThr
   }
   zPointArray output;
   zIntArray sources;
+  zIntArray outputFeatures;
   for (int i = 0; i < n;) {
     if (!merged[sequence[i]]) {
+      outputFeatures.push_back(recorded[sequence[i]]);
       sources.push_back(sequence[i]); output.push_back(points[sequence[i++]]); continue;
     }
     const int first = i;
@@ -937,9 +1004,13 @@ ZSPACE_INLINE bool zPrintSyn::reconstructCorners(PrintPath &path, float angleThr
       const int representative = sequence[first];
       output.push_back(zPoint(x, y, points[representative].z));
       sources.push_back(representative);
+      int features = PrintPath::IntersectionFeature;
+      for (int k = first; k <= last; ++k) features |= recorded[sequence[k]];
+      outputFeatures.push_back(features);
     } else {
       for (int k = first; k <= last; ++k) {
         sources.push_back(sequence[k]); output.push_back(points[sequence[k]]);
+        outputFeatures.push_back(recorded[sequence[k]]);
       }
     }
   }
@@ -950,8 +1021,10 @@ ZSPACE_INLINE bool zPrintSyn::reconstructCorners(PrintPath &path, float angleThr
     const auto offset = start-sources.begin();
     std::rotate(sources.begin(), start, sources.end());
     std::rotate(output.begin(), output.begin()+offset, output.end());
+    std::rotate(outputFeatures.begin(), outputFeatures.begin()+offset, outputFeatures.end());
   }
   PrintPath updated;
+  updated.featureFlags = outputFeatures;
   for (int id : sources) {
     if (!path.widths.empty()) updated.widths.push_back(path.widths[id]);
     if (!path.heights.empty()) updated.heights.push_back(path.heights[id]);
@@ -1020,6 +1093,14 @@ ZSPACE_INLINE bool zPrintSyn::alignStartPointsWith(PrintPathArray &ioPaths,
   if (outBadLayers)
     outBadLayers->clear();
   const int totalLayers = int(ioPaths.size());
+  for (int l = 0; l < totalLayers; ++l) for (const auto &path : ioPaths[l]) {
+    if (!path.featureFlags.empty() && path.featureFlags.size() !=
+        size_t(zFnGraph(const_cast<zObjGraph &>(path.graph)).numVertices())) {
+      outStatus = "failed: feature count does not match path vertices on layer " + std::to_string(l);
+      if (outBadLayers) outBadLayers->push_back(l);
+      return false;
+    }
+  }
   int seedLayer = -1;
   for (int l = 0; l < totalLayers; l++) {
     if (!ioPaths[l].empty()) {
@@ -1227,6 +1308,12 @@ ZSPACE_INLINE bool zPrintSyn::resamplePrintPaths(PrintPathArray &ioPaths2D,
                                       std::vector<int> *outBadLayers, bool useParallel) {
   if (outBadLayers)
     outBadLayers->clear();
+  if (!std::isfinite(settings.FeatureAngleTol) || settings.FeatureAngleTol < 0.0f ||
+      settings.FeatureAngleTol > 180.0f || !std::isfinite(settings.ResampleLength) ||
+      settings.ResampleLength < zTsField::MinPhysicalParameter) {
+    outStatus = "failed: invalid feature angle or resample length.";
+    return false;
+  }
   const int totalLayers = int(ioPaths2D.size());
   if (totalLayers == 0) {
     outStatus = "failed: No print paths available.";
@@ -1378,7 +1465,8 @@ ZSPACE_INLINE bool zPrintSyn::projectPrintPaths(const PrintPathArray &paths2D,
                                      PrintPathArray &outPaths3D,
                                      std::string &outStatus,
                                      std::vector<int> *outBadLayers, bool useParallel,
-                                     const std::vector<zFloatArray> *perLayerVertexHeights) {
+                                     const std::vector<zFloatArray> *perLayerVertexHeights,
+                                     const std::vector<zVectorArray> *perLayerVertexNormals) {
   outPaths3D.clear();
   if (outBadLayers)
     outBadLayers->clear();
@@ -1390,8 +1478,23 @@ ZSPACE_INLINE bool zPrintSyn::projectPrintPaths(const PrintPathArray &paths2D,
     return false;
   }
   static const zFloatArray emptyVertexLayerHeights;
+  if (perLayerVertexNormals) {
+    if (perLayerVertexNormals->size() != sections3D.size() || sections3D.size() < size_t(totalLayers)) {
+      outStatus = "failed: normal tables and sections must have one entry per layer.";
+      return false;
+    }
+    for (int l=0;l<totalLayers;++l) {
+      const auto &normals=(*perLayerVertexNormals)[l];
+      if ((!normals.empty() && normals.size()!=size_t(zFnMesh(const_cast<zObjMesh &>(sections3D[l])).numVertices())) ||
+          std::any_of(normals.begin(),normals.end(),[](const zVector &n){return !std::isfinite(n.x)||!std::isfinite(n.y)||!std::isfinite(n.z)||double(n.x)*n.x+double(n.y)*n.y+double(n.z)*n.z<=1e-12;})) {
+        outStatus="failed: invalid per-vertex normal table on layer "+std::to_string(l)+".";
+        if(outBadLayers)outBadLayers->push_back(l);
+        return false;
+      }
+    }
+  }
   if (perLayerVertexHeights) {
-    if (perLayerVertexHeights->size() != size_t(totalLayers) || sections3D.size() != size_t(totalLayers)) {
+    if (perLayerVertexHeights->size() != sections3D.size() || sections3D.size() < size_t(totalLayers)) {
       outStatus = "failed: height tables and sections must have one entry per layer.";
       return false;
     }
@@ -1413,6 +1516,7 @@ ZSPACE_INLINE bool zPrintSyn::projectPrintPaths(const PrintPathArray &paths2D,
 
   int totalPaths = 0;
   std::vector<char> remapFailed(totalLayers, 0);
+  std::vector<std::string> remapErrors(totalLayers);
   const auto wallStart = std::chrono::high_resolution_clock::now();
 
   zTsDetail::ParallelErrors parallelErrors5(totalLayers);
@@ -1426,20 +1530,30 @@ ZSPACE_INLINE bool zPrintSyn::projectPrintPaths(const PrintPathArray &paths2D,
         outPaths3D[l][r].graph = paths2D[l][r].graph;
         outPaths3D[l][r].widths = paths2D[l][r].widths;
         outPaths3D[l][r].trackIds = paths2D[l][r].trackIds;
+        outPaths3D[l][r].featureFlags = paths2D[l][r].featureFlags;
 
         zFnGraph fnContour(outPaths3D[l][r].graph);
         if (fnContour.numVertices() > 0 && l < int(charts2D.size()) &&
             l < int(sections3D.size())) {
-          if (!remapGraph(outPaths3D[l][r].graph,
+          std::string reason;
+          const bool validFeatures = paths2D[l][r].featureFlags.empty() ||
+              paths2D[l][r].featureFlags.size() == size_t(fnContour.numVertices());
+          if (!validFeatures) reason = "FeatureCountMismatch";
+          if (!validFeatures || !remapGraph(outPaths3D[l][r].graph,
                           const_cast<zObjMesh &>(charts2D[l]),
                           const_cast<zObjMesh &>(sections3D[l]),
                           &outPaths3D[l][r].normals, &meshVertexHeights,
-                          &outPaths3D[l][r].heights)) {
+                          &outPaths3D[l][r].heights, &reason,
+                          perLayerVertexNormals ? &(*perLayerVertexNormals)[l] : nullptr)) {
             remapFailed[l] = 1;
+            if (remapErrors[l].empty()) remapErrors[l] = "layer " + std::to_string(l) +
+                ", path " + std::to_string(r) + ": " + reason;
             outPaths3D[l][r] = PrintPath();
           }
         } else if (fnContour.numVertices() > 0) {
           remapFailed[l] = 1;
+          if (remapErrors[l].empty()) remapErrors[l] = "layer " + std::to_string(l) +
+              ", path " + std::to_string(r) + ": MissingChartOrSection";
           outPaths3D[l][r] = PrintPath();
         }
       }
@@ -1465,9 +1579,11 @@ ZSPACE_INLINE bool zPrintSyn::projectPrintPaths(const PrintPathArray &paths2D,
       failed.push_back(l);
   if (outBadLayers)
     *outBadLayers = failed;
-  if (!failed.empty())
+  if (!failed.empty()) {
+    outStatus = "failed: 2D-to-3D mapping on " + remapErrors[failed.front()];
     zTsUtils::printDebug("[projectPrintPaths] Some paths could not be mapped to their matching surface charts; their invalid projected graphs were discarded.");
-  return true;
+  }
+  return failed.empty();
 }
 
 ZSPACE_INLINE bool zPrintSyn::linkPrintPaths(const PrintPathArray &paths3D,
@@ -1475,7 +1591,7 @@ ZSPACE_INLINE bool zPrintSyn::linkPrintPaths(const PrintPathArray &paths3D,
                                   std::string &outStatus) {
   outCombined = PrintPath();
 
-  bool hasHeights = false, hasNormals = false, hasTrackIds = false;
+  bool hasHeights = false, hasNormals = false, hasTrackIds = false, hasFeatures = false;
   bool hasMultiplePaths = false;
   for (size_t layer = 0; layer < paths3D.size(); ++layer) {
     const auto &ringPaths = paths3D[layer];
@@ -1492,6 +1608,13 @@ ZSPACE_INLINE bool zPrintSyn::linkPrintPaths(const PrintPathArray &paths3D,
         hasNormals = true;
       if (!path.trackIds.empty())
         hasTrackIds = true;
+      if (!path.featureFlags.empty()) {
+        if (path.featureFlags.size() != size_t(zFnGraph(const_cast<zObjGraph &>(path.graph)).numVertices())) {
+          outStatus = "failed: feature count does not match path vertices on layer " + std::to_string(layer);
+          return false;
+        }
+        hasFeatures = true;
+      }
     }
   }
 
@@ -1501,6 +1624,7 @@ ZSPACE_INLINE bool zPrintSyn::linkPrintPaths(const PrintPathArray &paths3D,
   zVectorArray combinedNormals;
   zFloatArray combinedTrackIds;
   zIntArray combinedEdges;
+  zIntArray combinedFeatures;
 
   for (const auto &ringPaths : paths3D) {
     for (const PrintPath &layerPath : ringPaths) {
@@ -1521,6 +1645,11 @@ ZSPACE_INLINE bool zPrintSyn::linkPrintPaths(const PrintPathArray &paths3D,
                                positions.end());
       combinedWidths.insert(combinedWidths.end(), layerPath.widths.begin(),
                             layerPath.widths.end());
+      if (hasFeatures) {
+        if (!layerPath.featureFlags.empty())
+          combinedFeatures.insert(combinedFeatures.end(), layerPath.featureFlags.begin(), layerPath.featureFlags.end());
+        else combinedFeatures.insert(combinedFeatures.end(), positions.size(), 0);
+      }
       if (hasHeights) {
         if (!layerPath.heights.empty())
           combinedHeights.insert(combinedHeights.end(), layerPath.heights.begin(),
@@ -1567,6 +1696,7 @@ ZSPACE_INLINE bool zPrintSyn::linkPrintPaths(const PrintPathArray &paths3D,
   zFnGraph fnOut(outCombined.graph);
   fnOut.create(combinedPositions, combinedEdges);
   outCombined.widths = combinedWidths;
+  outCombined.featureFlags = combinedFeatures;
   if (hasHeights)
     outCombined.heights = combinedHeights;
   if (hasNormals)
@@ -1585,11 +1715,12 @@ ZSPACE_INLINE bool zPrintSyn::computePipeline(const zObjMeshArray &charts2D,
     SeamMapping seamMapping, const PrintSynSetting &settings,
     PrintPathArray &outPaths2D, PrintPathArray &outPaths3D,
     PrintPath &outCombined, std::string &outStatus, bool useParallel,
-    const std::vector<zFloatArray> *perLayerVertexHeights) {
+    const std::vector<zFloatArray> *perLayerVertexHeights,
+    const std::vector<zVectorArray> *perLayerVertexNormals) {
   outPaths3D.clear();
   outCombined = PrintPath();
   const size_t n = outPaths2D.size();
-  if (n == 0 || charts2D.size() != n || sections3D.size() != n) {
+  if (n == 0 || charts2D.size() < n || sections3D.size() < n) {
     outStatus = "failed: paths and charts must have one entry per layer.";
     return false;
   }
@@ -1601,10 +1732,10 @@ ZSPACE_INLINE bool zPrintSyn::computePipeline(const zObjMeshArray &charts2D,
       layers += (i ? "," : "") + std::to_string(badLayers[i]);
     const std::string reason = ok ? "problems on layer(s) " + layers
         : outStatus + (layers.empty() ? "" : " (layers " + layers + ")");
-    if (step != "projectPrintPaths" && step != "linkPrintPaths") {
+    if (step != "projectPrintPaths" && step != "resamplePrintPaths3D" && step != "linkPrintPaths") {
       std::string projectStatus;
       if (!projectPrintPaths(outPaths2D, charts2D, sections3D, vertexLayerHeights,
-                             outPaths3D, projectStatus, nullptr, useParallel, perLayerVertexHeights)) outPaths3D.clear();
+                             outPaths3D, projectStatus, nullptr, useParallel, perLayerVertexHeights, perLayerVertexNormals)) outPaths3D.clear();
     }
     outCombined = PrintPath();
     outStatus = "stopped at " + step + ": " + reason + " - the paths are kept as this step left them.";
@@ -1617,8 +1748,10 @@ ZSPACE_INLINE bool zPrintSyn::computePipeline(const zObjMeshArray &charts2D,
       : alignStartPoints(outPaths2D, charts2D, sections3D, settings.SeamOffset, settings.SeamSize, outStatus, &badLayers, useParallel);
   if (stopAt(aligned, "alignStartPoints")) return false;
   if (stopAt(projectPrintPaths(outPaths2D, charts2D, sections3D, vertexLayerHeights,
-                              outPaths3D, outStatus, &badLayers, useParallel, perLayerVertexHeights), "projectPrintPaths")) return false;
+                              outPaths3D, outStatus, &badLayers, useParallel, perLayerVertexHeights, perLayerVertexNormals), "projectPrintPaths")) return false;
   badLayers.clear();
+  if (stopAt(resamplePrintPaths3D(outPaths2D,outPaths3D,charts2D,sections3D,settings,
+      outStatus,useParallel,vertexLayerHeights,perLayerVertexHeights,perLayerVertexNormals),"resamplePrintPaths3D")) return false;
   if (stopAt(linkPrintPaths(outPaths3D, outCombined, outStatus), "linkPrintPaths")) return false;
   outStatus = "computePostProcess: " + std::to_string(n) + " layers processed. " + outStatus;
   return true;

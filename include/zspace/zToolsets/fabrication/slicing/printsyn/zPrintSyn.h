@@ -29,7 +29,11 @@ namespace zSpace {
  *	\brief Configuration settings for 2D toolpath cleanup and resampling.
  */
 struct PrintSynSetting {
+  // Arc-length spacing in the 2D chart, in model units; features are mandatory
+  // targets and may shorten intervals. 3D spacing depends on chart distortion.
   float ResampleLength = 0.1f;
+  // Angle between the incident edges, in degrees. Strictly less than this
+  // threshold selects a feature; equality is excluded (straight = 180).
   float FeatureAngleTol = 90.0f;
   float SeamOffset = 0.0f;
   float SeamSize = 0.0f;
@@ -60,6 +64,8 @@ public:
   static zIntArray cornerVertexIds(const PrintPath &path, float angleThreshold);
   // Reconstruct XY corner groups from two non-corner vertices on each side.
   // Parallel/degenerate groups or groups without enough support are preserved.
+  // Records AngleFeature/IntersectionFeature bits; previously recorded features
+  // are anchors and are not reconstructed again.
   static bool reconstructCorners(PrintPath &path, float angleThreshold);
 
 
@@ -74,10 +80,13 @@ public:
                                SeamMapping seamMapping, const PrintSynSetting &settings,
                                PrintPathArray &outPaths2D, PrintPathArray &outPaths3D,
                                PrintPath &outCombined, std::string &outStatus, bool useParallel = true,
-                               const std::vector<zFloatArray> *perLayerVertexHeights = nullptr);
+                               const std::vector<zFloatArray> *perLayerVertexHeights = nullptr,
+                               const std::vector<zVectorArray> *perLayerVertexNormals = nullptr);
 
   /*! \brief Step 1: resamples (corner-preserving), glitch-filters and
-   * orients every 2D print path in place. Bad layers: a first path that was
+   * orients every 2D print path in place. Carries featureFlags and preserves
+   * distinct feature targets regardless of nearby samples/closing distance.
+   * Bad layers: a first path that was
    * closed before and is open after. */
   static bool resamplePrintPaths(PrintPathArray &ioPaths2D,
                                  const PrintSynSetting &settings,
@@ -119,6 +128,10 @@ public:
    * vertexLayerHeights (optional, may be null) is passed straight to
    * zTsUtils::remapGraph(). perLayerVertexHeights, when supplied, overrides it
    * with one table per section, with one finite nonnegative height per vertex.
+   * perLayerVertexNormals optionally supplies recovered normals in that same
+   * section-vertex order; empty tables preserve face normals (e.g. fixed caps).
+   * Preserves vertex order/count and featureFlags. Returns false on any
+   * unmappable path; partial valid paths remain available for inspection.
    * Bad layers: a path that could not be remapped. */
   static bool projectPrintPaths(const PrintPathArray &paths2D,
                                 const zObjMeshArray &charts2D,
@@ -127,12 +140,24 @@ public:
                                 PrintPathArray &outPaths3D,
                                 std::string &outStatus,
                                 std::vector<int> *outBadLayers = nullptr, bool useParallel = true,
-                                const std::vector<zFloatArray> *perLayerVertexHeights = nullptr);
+                                const std::vector<zFloatArray> *perLayerVertexHeights = nullptr,
+                                const std::vector<zVectorArray> *perLayerVertexNormals = nullptr);
 
   /*! \brief Step 4: combines all 3D paths. Single-path layers are linked
    * bottom-to-top; disjoint curves remain separate without explicit travel. */
   static bool linkPrintPaths(const PrintPathArray &paths3D,
                              PrintPath &outCombined, std::string &outStatus);
+
+  // Second sampling pass in 3D, after reconstructed corners are mapped. Keeps
+  // exact mandatory targets; ordinary points have half-spacing clearance from
+  // adjacent features/endpoints and are placed on the current section. Updates
+  // the matching 2D targets/attributes using the same surface barycentrics.
+  static bool resamplePrintPaths3D(PrintPathArray &paths2D, PrintPathArray &paths3D,
+      const zObjMeshArray &charts2D, const zObjMeshArray &sections3D,
+      const PrintSynSetting &settings, std::string &status, bool useParallel=true,
+      const zFloatArray *vertexHeights=nullptr,
+      const std::vector<zFloatArray> *perLayerHeights=nullptr,
+      const std::vector<zVectorArray> *perLayerNormals=nullptr);
 
 private:
   // Carries the seed layer's start point to every layer: outMapped[l] /

@@ -1,0 +1,89 @@
+#include <zspace/zToolsets/fabrication/slicing/zSlicer/HarmonicSlicer.h>
+#include <algorithm>
+#include <numeric>
+#include <sstream>
+
+namespace zSpace {
+namespace {
+// Immutable point locator for the existing tetrahedral coordinate field. Its
+// purpose is containment and transported UV; it does not reimpose the old iso.
+class TetSampler {
+  using V=Eigen::Vector3d;
+  struct Bounds { V lo=V::Constant(INFINITY),hi=V::Constant(-INFINITY); };
+  struct Node { Bounds box;int first=0,last=0,left=-1,right=-1; };
+  const HarmonicField &tet_;
+  std::vector<Bounds> boxes_;
+  std::vector<int> order_;
+  std::vector<Node> nodes_;
+  double tolerance_=1e-9;
+  int build(int first,int last) {
+    const int id=int(nodes_.size());nodes_.push_back(Node());nodes_[id].first=first;nodes_[id].last=last;
+    for(int i=first;i<last;++i){nodes_[id].box.lo=nodes_[id].box.lo.cwiseMin(boxes_[order_[i]].lo);nodes_[id].box.hi=nodes_[id].box.hi.cwiseMax(boxes_[order_[i]].hi);}
+    if(last-first>8){Eigen::Index axis;(nodes_[id].box.hi-nodes_[id].box.lo).maxCoeff(&axis);const int mid=(first+last)/2;
+      std::nth_element(order_.begin()+first,order_.begin()+mid,order_.begin()+last,[&](int a,int b){return boxes_[a].lo[axis]+boxes_[a].hi[axis]<boxes_[b].lo[axis]+boxes_[b].hi[axis];});
+      const int left=build(first,mid),right=build(mid,last);nodes_[id].left=left;nodes_[id].right=right;}
+    return id;
+  }
+public:
+  explicit TetSampler(const HarmonicField &tet):tet_(tet),boxes_(tet.Volumes.size()) {
+    for(size_t t=0;t<tet.Volumes.size();++t)if(tet.Volumes[t].Valid){for(int id:tet.Volumes[t].VertexIds){const V p=zTsUtils::toEigenVec(tet.Vertices[id].Position);boxes_[t].lo=boxes_[t].lo.cwiseMin(p);boxes_[t].hi=boxes_[t].hi.cwiseMax(p);}order_.push_back(int(t));}
+    if(!order_.empty()){build(0,int(order_.size()));tolerance_=(std::max)(1e-9,2e-7*(nodes_[0].box.hi-nodes_[0].box.lo).norm());}
+  }
+  bool sample(const zPoint &position,zPoint *uv) const {
+    if(nodes_.empty())return false;const V p=zTsUtils::toEigenVec(position);std::array<int,64> pending;int count=0;pending[count++]=0;
+    while(count){const Node &node=nodes_[pending[--count]];
+      const double tol=tolerance_;
+      if((p.array()<node.box.lo.array()-tol).any()||(p.array()>node.box.hi.array()+tol).any())continue;
+      if(node.left>=0){pending[count++]=node.left;pending[count++]=node.right;continue;}
+      for(int j=node.first;j<node.last;++j){const int t=order_[j];const auto &ids=tet_.Volumes[t].VertexIds;
+        const V delta=p-zTsUtils::toEigenVec(tet_.Vertices[ids[0]].Position);
+        Eigen::Vector4d b=tet_.VolumeBasisGradients[t].transpose()*delta;b[0]+=1;
+        bool inside=true;for(int i=0;i<4;++i){const double btol=2e-6+tol*tet_.VolumeBasisGradients[t].col(i).norm();
+          if(b[i]<-btol||b[i]>1+btol){inside=false;break;}}
+        if(!inside)continue;
+        if(!uv)return true;
+        b=b.cwiseMax(0);b/=b.sum();V value=V::Zero();bool valid=true;
+        for(int i=0;i<4;++i)if(b[i]>1e-10){const V v=zTsUtils::toEigenVec(tet_.UVW[ids[i]]);if(!v.allFinite()){valid=false;break;}value+=b[i]*v;}
+        if(valid&&value.allFinite()){*uv=zPoint(value.x(),value.y(),value.z());return true;}
+      }
+    }return false;
+  }
+};
+}
+
+bool HarmonicSlicer::relaxContours(std::string &error, bool useParallel) {
+  o_VertexLayerNormals.assign(o_IsoMeshes.size(),zVectorArray());
+  zTsRelax::Settings settings;
+  settings.Iterations=i_Settings._HIsoRelaxIterations;
+  settings.Strength=i_Settings._HIsoRelaxStrength;
+  settings.MaxDeviation=i_Settings._HIsoRelaxMaxDeviation;
+  settings.Parallel=useParallel;
+  zTsRelax::Reference reference;reference.Positions=_Tet.Surface.Positions;reference.Triangles=_Tet.Surface.Triangles;
+  for(int face:_Tet.SurfaceFaceIds)reference.WidthIds.push_back(_Tet.FaceTags[face]==HarmonicField::TetFaceTag::Side?_Tet.FaceWidthIds[face]:-1);
+  std::vector<zTsRelax::Layer> layers(o_IsoMeshes.size());
+  for(size_t k=0;k<layers.size();++k){auto &layer=layers[k];zFnMesh fn(o_IsoMeshes[k]);fn.getVertexPositions(layer.Positions);
+    zIntArray connects,counts;fn.getPolygonData(connects,counts);size_t offset=0;
+    for(int count:counts){if(count!=3){error="Iso relaxation requires triangulated layers.";return false;}
+      layer.Triangles.push_back({connects[offset],connects[offset+1],connects[offset+2]});offset+=count;}
+    layer.UV=o_IsoMeshUV[k];layer.Heights=o_VertexLayerHeights[k];layer.BoundaryWidths=_HarmonicIsoEdgeWidthIds[k];
+  }
+  TetSampler sampler(_Tet);
+  if(!zTsRelax::relax(reference,layers,settings,[&](const zPoint &p,zPoint *uv){return sampler.sample(p,uv);},_IsoRelaxationReport,error))return false;
+  if(settings.Iterations==0)return true;
+  for(size_t k=0;k<layers.size();++k){if(k>0&&k+1<layers.size())zFnMesh(o_IsoMeshes[k]).setVertexPositions(layers[k].Positions);
+    _HarmonicIsoEdgeWidthIds[k].swap(layers[k].BoundaryWidths);
+    o_IsoMeshUV[k].swap(layers[k].UV);o_VertexLayerHeights[k].swap(layers[k].Heights);o_VertexLayerNormals[k].swap(layers[k].Normals);}
+  std::ostringstream report;report<<"[relaxContours] iterations="<<_IsoRelaxationReport.AcceptedIterations
+      <<" boundaryVerticesMoved="<<_IsoRelaxationReport.MovedBoundaryVertices
+      <<" maxDisplacement="<<_IsoRelaxationReport.MaxDisplacement
+      <<" maxBoundaryError="<<_IsoRelaxationReport.MaxBoundaryError
+      <<" minimumInitialGap="<<_IsoRelaxationReport.MinimumInitialGap
+      <<" recoveredBoundaryTags="<<_IsoRelaxationReport.RecoveredBoundaryTags
+      <<" uvConstrainedVertices="<<_IsoRelaxationReport.UVConstrainedVertices
+      <<" sliverConstrainedVertices="<<_IsoRelaxationReport.SliverConstrainedVertices
+      <<" geometryConstrainedVertices="<<_IsoRelaxationReport.GeometryConstrainedVertices
+      <<" lastRejectedStep="<<_IsoRelaxationReport.LastRejectedReason
+      <<" boundaryHeightPlaneEstimates="<<_IsoRelaxationReport.PlaneHeightEstimates;
+  zTsUtils::printDebug(report.str());return true;
+}
+} // namespace zSpace

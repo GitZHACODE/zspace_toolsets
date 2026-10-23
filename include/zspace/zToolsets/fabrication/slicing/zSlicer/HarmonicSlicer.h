@@ -21,6 +21,7 @@
 
 #include <zspace/zToolsets/zToolsetsExport.h>
 #include <zspace/zToolsets/fabrication/slicing/utils/Utils.h>
+#include <zspace/zToolsets/fabrication/slicing/utils/IsoRelaxation.h>
 #include <zspace/zToolsets/fabrication/slicing/zSlicer/zSlicer.h>
 
 #include <zspace/interface.h>
@@ -148,6 +149,8 @@ protected:
   zObjGraphArray o_IsoMeshBoundary;
   std::vector<zPointArray> o_IsoMeshUV;
   std::vector<zFloatArray> o_VertexLayerHeights;
+  std::vector<zVectorArray> o_VertexLayerNormals;
+  zTsRelax::Report _IsoRelaxationReport;
   std::vector<EdgeWidthIds> _HarmonicIsoEdgeWidthIds;
 
   zObjMeshArray o_IsoMeshes2D;
@@ -211,9 +214,11 @@ public:
   zObjMeshArray &getIsoMeshes() { return o_IsoMeshes; }
   const zObjMeshArray &getIsoMeshes() const { return o_IsoMeshes; }
   const std::vector<zPointArray> &getIsoMeshUV() const { return o_IsoMeshUV; }
-  // One height per iso-mesh vertex, in model units: volume-weighted local
-  // delta-w / |grad(w)|, interpolated at intersections (also on both caps).
+  // One height per vertex: relaxed geometric normal spacing, or the original
+  // gradient-based estimate when iso relaxation is disabled.
   const std::vector<zFloatArray> &getVertexLayerHeights() const { return o_VertexLayerHeights; }
+  const std::vector<zVectorArray> &getVertexLayerNormals() const { return o_VertexLayerNormals; }
+  const zTsRelax::Report &getIsoRelaxationReport() const { return _IsoRelaxationReport; }
   const zObjGraphArray &getIsoMeshBoundary() const { return o_IsoMeshBoundary; }
 
   const zObjMeshArray &getIsoMeshes2D() const { return o_IsoMeshes2D; }
@@ -316,6 +321,7 @@ private:
                          std::string *failureReason = nullptr) const;
 
   struct ContourData;
+  bool relaxContours(std::string &error, bool useParallel);
   bool computeVertexLayerHeights(int numLayers, zFloatArray &heights) const;
   int crossingVertex(int a, int b, float iso, const zFloatArray &vertexHeights, ContourData &slice);
   static bool

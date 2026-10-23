@@ -29,6 +29,11 @@ using namespace zTsUtils;
 // Input face tags/width IDs become TetGen facet markers. Rebuild the refined
 // surface with shared volume vertex IDs, then build full edge/face incidence.
 ZSPACE_INLINE bool HarmonicSlicer::buildTetVolume() {
+  if (!std::isfinite(i_Settings._HTetEdgeLengthScale) ||
+      i_Settings._HTetEdgeLengthScale <= 0.0 || i_Settings._HTetEdgeLengthScale > 1.0) {
+    _Status = "computeBasicStructure failed: _HTetEdgeLengthScale must be finite and in (0,1].";
+    return false;
+  }
   tetgenio input;
   tetgenio output;
   input.firstnumber = 0;
@@ -77,17 +82,22 @@ ZSPACE_INLINE bool HarmonicSlicer::buildTetVolume() {
   // large Delaunay tets spanning the whole volume: "-q1.4" caps the
   // radius-edge ratio (element shape), "-a<volume>" caps each tet's volume,
   // both driving TetGen to insert interior Steiner points. Target volume is
-  // that of a regular tetrahedron whose edge equals the input mesh's own
-  // mean edge length, so tet density roughly matches the input surface's
-  // own resolution. Without "-Y" the quality/volume bounds may also split
+  // that of a regular tetrahedron whose edge is the input mesh's mean edge
+  // length times _HTetEdgeLengthScale. This refines the volume independently
+  // of the input mesh. Without "-Y" the quality/volume bounds may also split
   // boundary facets/edges - those surface points are tagged from the facet
   // markers and the surface rebuilt below.
-  const double targetEdgeLength = meanEdgeLength(_Tet.Surface.Positions, _Tet.Surface.Triangles);
+  const double meanSurfaceEdge = meanEdgeLength(_Tet.Surface.Positions, _Tet.Surface.Triangles);
+  const double targetEdgeLength = meanSurfaceEdge * i_Settings._HTetEdgeLengthScale;
   std::string switchesStr = "pQ";
-  if (targetEdgeLength > 1e-6) {
+  if (meanSurfaceEdge > 1e-6) {
     const double targetVolume = (targetEdgeLength * targetEdgeLength * targetEdgeLength) / (6.0 * std::sqrt(2.0));
+    if (!std::isfinite(targetVolume) || targetVolume <= 0.0) {
+      _Status = "computeBasicStructure failed: tetrahedral target volume is not finite and positive.";
+      return false;
+    }
     char volumeText[64];
-    std::snprintf(volumeText, sizeof(volumeText), "%.10f", targetVolume);
+    std::snprintf(volumeText, sizeof(volumeText), "%.17g", targetVolume);
     switchesStr = std::string("pq1.4a") + volumeText + "Q";
   }
   std::vector<char> switches(switchesStr.begin(), switchesStr.end());
@@ -467,6 +477,8 @@ ZSPACE_INLINE void HarmonicSlicer::clearContours() {
   o_IsoMeshBoundary.clear();
   o_IsoMeshUV.clear();
   o_VertexLayerHeights.clear();
+  o_VertexLayerNormals.clear();
+  _IsoRelaxationReport = zTsRelax::Report();
   _HarmonicIsoEdgeWidthIds.clear();
 }
 
