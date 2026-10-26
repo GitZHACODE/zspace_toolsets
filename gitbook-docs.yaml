@@ -1,0 +1,30 @@
+$schema: https://api.gitbook.com/gitbook-docs.yaml
+version: 1
+site:
+  title: zSpace Toolsets
+  structure:
+    - type: section
+      key: section-toolsets
+      title: Toolsets
+      path: toolsets
+      default: true
+      children:
+        - type: space
+          key: space-toolsets-architecture
+          title: Algorithms and Architecture
+          path: architecture
+          default: true
+          content:
+            directory: ./docs/architecture
+        - type: space
+          key: space-toolsets-contributor-guides
+          title: Contributor Guide
+          path: contributors
+          content:
+            directory: ./agents
+        - type: space
+          key: space-toolsets-wasm
+          title: WebAssembly Runtime
+          path: wasm
+          content:
+            directory: ./wasm
