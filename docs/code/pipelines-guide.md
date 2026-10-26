@@ -1,7 +1,5 @@
 # Working with toolset pipelines
 
-## Working with toolset pipelines
-
 ### 3D printing: zTs3DP
 
 Provide an input through fromMesh or readMesh, set the layer height, field resolution, print width/spacing and other slicing parameters, then computeAll or call the stages explicitly. The declared stages are computeSlicingFeatures, computeSlices, computeUnrolledSlices, computeUnrolledSDFs, computePrintPaths and computePrintMesh. Results include slice meshes, unrolled slices, contours, loops, corner points and print geometry. clearResults resets generated output; consult settings() and the stage APIs when building a partial pipeline.

@@ -1,7 +1,5 @@
 # Toolsets WebAssembly and buffer ownership
 
-## Toolsets WebAssembly and buffer ownership
-
 The toolsets browser runtime is its own zspace\_toolsets.js/.wasm pair. Core and Toolsets do not share heaps or native pointers. Viewer adapters translate scene geometry into the receiving module’s input representation and copy the returned geometry into JavaScript-owned arrays.
 
 The bridge reference covers the main toolsets bridge and the separate Force C-Tubes/Force Polyhedra bridge source files. Session handles, allocation/free functions and typed packet exports must be paired within the same module. Dispose a session when the owning UI/sketch is removed.

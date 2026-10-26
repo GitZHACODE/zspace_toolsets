@@ -1,7 +1,5 @@
 # Architecture and method ownership
 
-## Architecture and method ownership
-
 zspace\_toolsets builds focused project methods on top of zspace\_core. Maintained declarations are under include/zspace/zToolsets/ and implementations under src/zToolsets/. legacy/pre-v3 is historical reference and is excluded from this API reference.
 
 The native build locates its sibling Core through ZSPACE\_CORE\_DIR, defaulting to ../zspace\_core, and links the kernel modules it uses. Toolsets accept and return Core geometry objects; they own project-specific settings, staged computation and reports.
