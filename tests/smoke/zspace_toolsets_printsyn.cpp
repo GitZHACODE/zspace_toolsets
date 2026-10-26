@@ -64,6 +64,32 @@ PrintPath resample(PrintPath input, float spacing, float angle) {
   aligned(layers[0][0]);
   return layers[0][0];
 }
+zObjMesh chart();
+void surfaceContourOutput(){
+  zPointArray p;for(int i=0;i<100;++i){const double angle=i*6.283185307179586/100;p.emplace_back(1+.8*std::cos(angle),1+.8*std::sin(angle),0);}
+  auto raw=path(p,true);raw.trackIds.assign(p.size(),0);raw.featureFlags.assign(p.size(),0);raw.featureFlags[50]=PrintPath::AngleFeature|PrintPath::IntersectionFeature;
+  zObjMeshArray charts{chart()},sections{chart()};PrintSynSetting settings;settings.ResampleLength=.5f;settings.FeatureAngleTol=0;settings.SeamOffset=0;settings.SeamSize=0;
+  PrintPathArray first{{raw}},second=first,a,b,hidden;PrintPath ca,cb;std::string sa,sb;
+  require(zPrintSyn::computePipeline(charts,sections,nullptr,zPrintSyn::SeamMapping::WorldNearest,settings,first,a,ca,sa,false),sa);
+  require(zPrintSyn::computePipeline(charts,sections,nullptr,zPrintSyn::SeamMapping::WorldNearest,settings,second,b,cb,sb,false,nullptr,nullptr,&hidden),sb);
+  const auto compare=[](const PrintPath &a,const PrintPath &b){const auto p=positions(a),q=positions(b);require(p.size()==q.size(),"Hidden output changed target count");
+    for(size_t i=0;i<p.size();++i)require(zTsUtils::vecDistSq(p[i],q[i])==0,"Hidden output changed target geometry");
+    require(a.featureFlags==b.featureFlags&&a.heights==b.heights&&a.widths==b.widths&&a.trackIds==b.trackIds,"Hidden output changed attributes/features");
+    require(a.normals.size()==b.normals.size(),"Hidden output changed normal count");for(size_t i=0;i<a.normals.size();++i)require(zTsUtils::vecDistSq(a.normals[i],b.normals[i])==0,"Hidden output changed normals");
+    zIntArray ea,eb;zFnGraph(const_cast<zObjGraph&>(a.graph)).getEdgeData(ea);zFnGraph(const_cast<zObjGraph&>(b.graph)).getEdgeData(eb);require(ea==eb,"Hidden output changed connectivity");};
+  compare(ca,cb);compare(first[0][0],second[0][0]);compare(a[0][0],b[0][0]);
+  // The observer owns the actual processed source immediately before final
+  // sampling. Restored angular preprocessing intentionally replaces raw points.
+  PrintPathArray expected{{raw}};std::vector<int> bad;
+  require(zPrintSyn::resamplePrintPaths(expected,settings,sa,&bad,false)&&bad.empty(),sa);
+  require(zPrintSyn::alignStartPoints(expected,charts,sections,settings.SeamOffset,settings.SeamSize,sa,&bad,false)&&bad.empty(),sa);
+  require(hidden.size()==1&&hidden[0].size()==1,"Hidden output lost the processed curve");
+  compare(hidden[0][0],expected[0][0]);
+  raw.featureFlags.pop_back();first={{raw}};second=first;
+  require(!zPrintSyn::computePipeline(charts,sections,nullptr,zPrintSyn::SeamMapping::WorldNearest,settings,first,a,ca,sa,false),"Old pipeline accepted invalid feature data");
+  require(!zPrintSyn::computePipeline(charts,sections,nullptr,zPrintSyn::SeamMapping::WorldNearest,settings,second,b,cb,sb,false,nullptr,nullptr,&hidden),"Observed pipeline accepted invalid feature data");
+  require(hidden.empty()&&sa==sb&&positions(ca).empty()&&positions(cb).empty(),"Failed pipeline retained hidden/combined results");
+}
 void resampling() {
   // Strict threshold semantics: equality is intentionally excluded.
   const auto corner = path({{0,0,0},{1.005,0,0},{1.005,1,0}});
@@ -302,7 +328,7 @@ void slicerIntegration(zTsSlicerMode mode) {
 }
 int main() {
   try {
-    resampling(); mapping(); slicerIntegration(zTsSlicerMode::Topology);
+    surfaceContourOutput(); resampling(); mapping(); slicerIntegration(zTsSlicerMode::Topology);
 #ifdef ZSPACE_TOOLSETS_WITH_TETGEN
     slicerIntegration(zTsSlicerMode::Harmonic);
 #endif

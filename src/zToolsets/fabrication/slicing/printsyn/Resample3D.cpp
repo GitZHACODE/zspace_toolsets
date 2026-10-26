@@ -1,6 +1,7 @@
 #include <zspace/zToolsets/fabrication/slicing/printsyn/zPrintSyn.h>
 #include <zspace/zToolsets/fabrication/slicing/utils/Parallel.h>
 #include "../utils/SurfaceQuery.h"
+#include "../utils/Interpolation.h"
 #include <algorithm>
 #include <cmath>
 #include <sstream>
@@ -34,7 +35,9 @@ bool resampleMapped(PrintPath &path2D,PrintPath &path3D,const zPointArray &chart
     if(!mandatory){zTsDetail::SurfaceQuery::Hit hit;if(located)hit=*located;else if(!surface.nearest(point(target),hit)){error="Cannot place new sample on its section.";return false;}
       target=hit.Position;const auto &tri=surface.triangle(hit.Triangle);flat.setZero();
       for(int k=0;k<3;++k)flat+=hit.Weights[k]*toEigenVec(chart[tri.Ids[k]]);
-      if(heights&&!heights->empty()){height=0;for(int k=0;k<3;++k)height+=float(hit.Weights[k]*(*heights)[tri.Ids[k]]);}
+      if(heights&&!heights->empty())height=float(zTsDetail::interpolateScalar(
+        (*heights)[tri.Ids[0]],(*heights)[tri.Ids[1]],(*heights)[tri.Ids[2]],
+        hit.Weights[0],hit.Weights[1],hit.Weights[2]));
       if(normals&&!normals->empty()){normal.setZero();for(int k=0;k<3;++k)normal+=hit.Weights[k]*toEigenVec((*normals)[tri.Ids[k]]);}else normal=tri.Normal;
     }
     if(normal.norm()>0)normal.normalize();

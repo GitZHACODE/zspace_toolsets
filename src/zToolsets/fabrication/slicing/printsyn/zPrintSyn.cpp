@@ -26,6 +26,9 @@
 #include <cmath>
 #include <iomanip>
 #include <limits>
+#include <map>
+#include <memory>
+#include "../utils/SurfaceQuery.h"
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -1040,6 +1043,15 @@ ZSPACE_INLINE bool zPrintSyn::reconstructCorners(PrintPath &path, float angleThr
 }
 
 
+ZSPACE_INLINE zIntArray zPrintSyn::featureVertexIds(const PrintPath &path,float fallbackAngleThreshold) {
+  if(path.featureFlags.empty())return cornerVertexIds(path,fallbackAngleThreshold);
+  if(path.featureFlags.size()!=size_t(zFnGraph(const_cast<zObjGraph&>(path.graph)).numVertices()))return {};
+  zIntArray ids;for(size_t i=0;i<path.featureFlags.size();++i)
+    if(path.featureFlags[i]&(PrintPath::AngleFeature|PrintPath::IntersectionFeature))ids.push_back(int(i));
+  return ids;
+}
+
+
 //--------------------------
 //---- PRIVATE METHODS
 //--------------------------
@@ -1458,6 +1470,23 @@ ZSPACE_INLINE bool zPrintSyn::alignStartPoints(PrintPathArray &ioPaths2D,
       seamOffset, seamSize, outStatus, outBadLayers, useParallel);
 }
 
+namespace {
+// Fast exact/near-roundoff chart hits avoid scanning every triangle for every
+// dense source vertex. Unsupported hits retain remapGraph's full diagnostics
+// and tolerance handling; realization remains the shared barycentric method.
+bool cachedRemap(zObjGraph &graph,zObjMesh &section,const zTsDetail::SurfaceQuery &query,
+    double tolerance,zVectorArray *normals,const zFloatArray *heights,zFloatArray *mappedHeights,
+    const zVectorArray *vertexNormals){
+  zPointArray p;zFnGraph fn(graph);fn.getVertexPositions(p);ParameterGraph params;fn.getEdgeData(params.edgeConnects);
+  params.vertices.reserve(p.size());
+  for(const auto &point:p){if(!std::isfinite(point.x)||!std::isfinite(point.y)||!std::isfinite(point.z))return false;
+    zTsDetail::SurfaceQuery::Hit hit;if(!query.uniqueChartHit(point,hit,tolerance))return false;
+    const auto &ids=query.triangle(hit.Triangle).Ids;
+    params.vertices.push_back({ids[0],ids[1],ids[2],float(hit.Weights[0]),float(hit.Weights[1]),float(hit.Weights[2])});}
+  return realizeParameterGraph(params,section,graph,normals,heights,mappedHeights,vertexNormals);
+}
+}
+
 ZSPACE_INLINE bool zPrintSyn::projectPrintPaths(const PrintPathArray &paths2D,
                                      const zObjMeshArray &charts2D,
                                      const zObjMeshArray &sections3D,
@@ -1526,6 +1555,14 @@ ZSPACE_INLINE bool zPrintSyn::projectPrintPaths(const PrintPathArray &paths2D,
       const zFloatArray &meshVertexHeights = perLayerVertexHeights
           ? (*perLayerVertexHeights)[l]
           : (vertexLayerHeights ? *vertexLayerHeights : emptyVertexLayerHeights);
+      std::unique_ptr<zTsDetail::SurfaceQuery> chartQuery;double chartTolerance=0;
+      if(l<int(charts2D.size())&&l<int(sections3D.size())){
+        auto &chart=const_cast<zObjMesh&>(charts2D[l]);auto &section=const_cast<zObjMesh&>(sections3D[l]);
+        zIntArray a,b,c,d;zFnMesh(chart).getPolygonData(a,b);zFnMesh(section).getPolygonData(c,d);
+        zPointArray p;zFnMesh(chart).getVertexPositions(p);double scale=1;bool finite=true;
+        for(const auto &v:p){finite&=std::isfinite(v.x)&&std::isfinite(v.y)&&std::isfinite(v.z);scale=(std::max)(scale,zTsUtils::toEigenVec(v).cwiseAbs().maxCoeff());}
+        if(finite&&p.size()==size_t(zFnMesh(section).numVertices())&&a==c&&b==d){chartQuery=std::make_unique<zTsDetail::SurfaceQuery>(chart);chartTolerance=(std::max)(1e-7,8*std::numeric_limits<float>::epsilon()*scale);}
+      }
       for (size_t r = 0; r < paths2D[l].size(); r++) {
         outPaths3D[l][r].graph = paths2D[l][r].graph;
         outPaths3D[l][r].widths = paths2D[l][r].widths;
@@ -1539,12 +1576,15 @@ ZSPACE_INLINE bool zPrintSyn::projectPrintPaths(const PrintPathArray &paths2D,
           const bool validFeatures = paths2D[l][r].featureFlags.empty() ||
               paths2D[l][r].featureFlags.size() == size_t(fnContour.numVertices());
           if (!validFeatures) reason = "FeatureCountMismatch";
-          if (!validFeatures || !remapGraph(outPaths3D[l][r].graph,
+          const bool cached=validFeatures&&chartQuery&&cachedRemap(outPaths3D[l][r].graph,
+              const_cast<zObjMesh&>(sections3D[l]),*chartQuery,chartTolerance,&outPaths3D[l][r].normals,
+              &meshVertexHeights,&outPaths3D[l][r].heights,perLayerVertexNormals?&(*perLayerVertexNormals)[l]:nullptr);
+          if (!validFeatures || (!cached&&!remapGraph(outPaths3D[l][r].graph,
                           const_cast<zObjMesh &>(charts2D[l]),
                           const_cast<zObjMesh &>(sections3D[l]),
                           &outPaths3D[l][r].normals, &meshVertexHeights,
                           &outPaths3D[l][r].heights, &reason,
-                          perLayerVertexNormals ? &(*perLayerVertexNormals)[l] : nullptr)) {
+                          perLayerVertexNormals ? &(*perLayerVertexNormals)[l] : nullptr))) {
             remapFailed[l] = 1;
             if (remapErrors[l].empty()) remapErrors[l] = "layer " + std::to_string(l) +
                 ", path " + std::to_string(r) + ": " + reason;
@@ -1717,6 +1757,18 @@ ZSPACE_INLINE bool zPrintSyn::computePipeline(const zObjMeshArray &charts2D,
     PrintPath &outCombined, std::string &outStatus, bool useParallel,
     const std::vector<zFloatArray> *perLayerVertexHeights,
     const std::vector<zVectorArray> *perLayerVertexNormals) {
+  return computePipeline(charts2D,sections3D,vertexLayerHeights,seamMapping,settings,
+      outPaths2D,outPaths3D,outCombined,outStatus,useParallel,perLayerVertexHeights,perLayerVertexNormals,nullptr);
+}
+
+ZSPACE_INLINE bool zPrintSyn::computePipeline(const zObjMeshArray &charts2D,
+    const zObjMeshArray &sections3D, const zFloatArray *vertexLayerHeights,
+    SeamMapping seamMapping, const PrintSynSetting &settings,
+    PrintPathArray &outPaths2D, PrintPathArray &outPaths3D,
+    PrintPath &outCombined, std::string &outStatus, bool useParallel,
+    const std::vector<zFloatArray> *perLayerVertexHeights,
+    const std::vector<zVectorArray> *perLayerVertexNormals,PrintPathArray *outSurfaceContours2D) {
+  if(outSurfaceContours2D)outSurfaceContours2D->clear();
   outPaths3D.clear();
   outCombined = PrintPath();
   const size_t n = outPaths2D.size();
@@ -1727,6 +1779,7 @@ ZSPACE_INLINE bool zPrintSyn::computePipeline(const zObjMeshArray &charts2D,
   std::vector<int> badLayers;
   const auto stopAt = [&](bool ok, const std::string &step) {
     if (ok && badLayers.empty()) return false;
+    if(outSurfaceContours2D)outSurfaceContours2D->clear();
     std::string layers;
     for (size_t i = 0; i < badLayers.size(); ++i)
       layers += (i ? "," : "") + std::to_string(badLayers[i]);
@@ -1749,6 +1802,7 @@ ZSPACE_INLINE bool zPrintSyn::computePipeline(const zObjMeshArray &charts2D,
   if (stopAt(aligned, "alignStartPoints")) return false;
   if (stopAt(projectPrintPaths(outPaths2D, charts2D, sections3D, vertexLayerHeights,
                               outPaths3D, outStatus, &badLayers, useParallel, perLayerVertexHeights, perLayerVertexNormals), "projectPrintPaths")) return false;
+  if(outSurfaceContours2D)*outSurfaceContours2D=outPaths2D;
   badLayers.clear();
   if (stopAt(resamplePrintPaths3D(outPaths2D,outPaths3D,charts2D,sections3D,settings,
       outStatus,useParallel,vertexLayerHeights,perLayerVertexHeights,perLayerVertexNormals),"resamplePrintPaths3D")) return false;

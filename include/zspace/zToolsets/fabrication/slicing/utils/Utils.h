@@ -76,11 +76,22 @@ enum VertexTag : int { Interior = 0, Bottom = 1, Top = 2, Side = 3 };
 // (zTsIO::readSlicerInputUSD()). The slicers derive the per-vertex tags they
 // work with from them - zTsUtils::vertexTagsFromFaceTags().
 
+// Independent fabrication bounds, never inferred from measured output stats.
+struct PrintHeightOptimizationSettings {
+  bool Enabled = false; // Harmonic only; bounds use the mesh's model units.
+  double Tolerance = 0.0; // Fabrication allowance in model units; measured values are never clamped.
+  double Minimum = 6.0, Maximum = 12.0;
+  int Iterations = 16;
+  bool RedistributeIsoValues = true;
+  bool AllowLayerCountChange = true;
+  bool OptimizeSurfaces = true; // False retains scheduling only; never enables the old path-target Newton solver.
+  double MaxDisplacement = 0.0; // 0: two maximum target heights, from the relaxed seed.
+};
+
 /*! \struct SlicerSettings
  *	\brief One settings set for both slicer operators. Each operator reads
- *  only what it needs: the shared print-field entries (plain names) are used
- *  by both, T* entries only by TopologySlicer and H* entries only by
- *  HarmonicSlicer. (PrintSynSetting lives in zPrintSyn.h.)
+ *  only what it needs: shared plain names, T* for Topology, H* for Harmonic.
+ *  PrintSynSetting lives in zPrintSyn.h.
  */
 struct SlicerSettings {
   //---- Shared: SDF print-field inputs (zTsField)
@@ -123,7 +134,7 @@ struct SlicerSettings {
   // Tetrahedral target edge length relative to the input surface's mean
   // triangle edge. Must be finite and in (0,1]. 1 restores the original
   // density; 0.5 refines the volume without modifying the input mesh.
-  double _HTetEdgeLengthScale = 0.5;
+  double _HTetEdgeLengthScale = 1.0;
   // Constrained relaxation of intermediate harmonic layers before unrolling.
   // Caps remain fixed; boundary vertices slide on their input side patches.
   // 0 iterations retains the original geometry, height and face-normal path.
@@ -131,6 +142,7 @@ struct SlicerSettings {
   double _HIsoRelaxStrength = 0.25; // finite (0,1]
   // Model units; 0 uses a limit derived from neighbouring-layer separation.
   double _HIsoRelaxMaxDeviation = 0.0;
+  PrintHeightOptimizationSettings HPrintHeight;
   // Maximum Euler tracing step as a fraction of the current simplex's
   // minimum altitude (volume and wall traces). Must be in (0, 1].
   double _HTraceStepFraction = 0.2;
@@ -750,6 +762,9 @@ struct SlicerUSDInput {
   zFloatArray BracingPrintWidths;
   zPoint StartPoint;
   std::string SettingsJSON;
+  // Root customLayerData double[] printheightdomain, converted to mm. Empty
+  // when absent. Input target; export overwrites metadata with measured output.
+  std::vector<double> PrintHeightDomain;
   double MetersPerUnit = 0.01;
   std::string UpAxis;
 };

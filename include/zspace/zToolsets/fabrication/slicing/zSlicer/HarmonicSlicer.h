@@ -151,6 +151,9 @@ protected:
   std::vector<zFloatArray> o_VertexLayerHeights;
   std::vector<zVectorArray> o_VertexLayerNormals;
   zTsRelax::Report _IsoRelaxationReport;
+  zTsRelax::HeightReport _PrintHeightOptimizationReport;
+  std::vector<double> _IsoValues;
+  int _RequestedSectionCount = 0;
   std::vector<EdgeWidthIds> _HarmonicIsoEdgeWidthIds;
 
   zObjMeshArray o_IsoMeshes2D;
@@ -218,6 +221,8 @@ public:
   // gradient-based estimate when iso relaxation is disabled.
   const std::vector<zFloatArray> &getVertexLayerHeights() const { return o_VertexLayerHeights; }
   const std::vector<zVectorArray> &getVertexLayerNormals() const { return o_VertexLayerNormals; }
+  const zTsRelax::HeightReport &getPrintHeightOptimizationReport() const { return _PrintHeightOptimizationReport; }
+  const std::vector<double> &getIsoValues() const { return _IsoValues; }
   const zTsRelax::Report &getIsoRelaxationReport() const { return _IsoRelaxationReport; }
   const zObjGraphArray &getIsoMeshBoundary() const { return o_IsoMeshBoundary; }
 
@@ -322,6 +327,9 @@ private:
 
   struct ContourData;
   bool relaxContours(std::string &error, bool useParallel);
+  std::vector<zTsRelax::Layer> relaxationLayers() const;
+  bool optimizeSurfaceHeightDomain(const std::vector<zPointArray> *targets,std::string &error,bool useParallel);
+  bool rebuildSurfaceCharts(bool useParallel);
   bool computeVertexLayerHeights(int numLayers, zFloatArray &heights) const;
   int crossingVertex(int a, int b, float iso, const zFloatArray &vertexHeights, ContourData &slice);
   static bool

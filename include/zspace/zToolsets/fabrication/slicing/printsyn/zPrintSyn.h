@@ -29,9 +29,13 @@ namespace zSpace {
  *	\brief Configuration settings for 2D toolpath cleanup and resampling.
  */
 struct PrintSynSetting {
-  // Arc-length spacing in the 2D chart, in model units; features are mandatory
-  // targets and may shorten intervals. 3D spacing depends on chart distortion.
+  // First-pass spacing uses 2D chart arc length. Final targets are redistributed
+  // along the mapped 3D polyline between mandatory angle/intersection features.
+  // Nearby ordinary samples yield to feature clearance; short feature spans stay exact.
   float ResampleLength = 0.1f;
+  // Retained for settings/layout compatibility. The restored sharp-feature
+  // sampler does not use this setting or add curvature-support targets.
+  double SurfaceChordTolerance = 0.1;
   // Angle between the incident edges, in degrees. Strictly less than this
   // threshold selects a feature; equality is excluded (straight = 180).
   float FeatureAngleTol = 90.0f;
@@ -49,7 +53,7 @@ struct PrintSynSetting {
  *  computePostProcess() runs computePipeline() on its own paths/charts/
  *  sections, selecting the seam mapping strategy. The stage order is:
  *    resamplePrintPaths -> alignStartPoints ->
- *    projectPrintPaths -> linkPrintPaths
+ *    projectPrintPaths -> resamplePrintPaths3D -> linkPrintPaths
  *  Each method prints its own "[zPrintSyn::...]" success/failure line and
  *  writes the same message to outStatus. outBadLayers (optional) gets the
  *  layers the step reports a problem on (sorted; empty if none) - a step can
@@ -62,6 +66,9 @@ public:
 
   // Current geometric corners (open endpoints excluded), using FeatureAngleTol.
   static zIntArray cornerVertexIds(const PrintPath &path, float angleThreshold);
+  // Recorded angle/intersection features. Paths without feature metadata fall
+  // back to geometric angle detection.
+  static zIntArray featureVertexIds(const PrintPath &path, float fallbackAngleThreshold);
   // Reconstruct XY corner groups from two non-corner vertices on each side.
   // Parallel/degenerate groups or groups without enough support are preserved.
   // Records AngleFeature/IntersectionFeature bits; previously recorded features
@@ -82,6 +89,21 @@ public:
                                PrintPath &outCombined, std::string &outStatus, bool useParallel = true,
                                const std::vector<zFloatArray> *perLayerVertexHeights = nullptr,
                                const std::vector<zVectorArray> *perLayerVertexNormals = nullptr);
+
+  // Same production result; optional owned COPY of the successfully mapped,
+  // seam-trimmed processed 2D contours before final target sampling. This is
+  // internal validation geometry, never an additional fabrication target list.
+  // The pointer is explicit to keep existing calls and their ABI unambiguous.
+  // Its output is cleared on entry and on any pipeline failure.
+  static bool computePipeline(const zObjMeshArray &charts2D,
+                               const zObjMeshArray &sections3D,
+                               const zFloatArray *vertexLayerHeights,
+                               SeamMapping seamMapping, const PrintSynSetting &settings,
+                               PrintPathArray &outPaths2D, PrintPathArray &outPaths3D,
+                               PrintPath &outCombined, std::string &outStatus, bool useParallel,
+                               const std::vector<zFloatArray> *perLayerVertexHeights,
+                               const std::vector<zVectorArray> *perLayerVertexNormals,
+                               PrintPathArray *outSurfaceContours2D);
 
   /*! \brief Step 1: resamples (corner-preserving), glitch-filters and
    * orients every 2D print path in place. Carries featureFlags and preserves

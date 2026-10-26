@@ -113,5 +113,89 @@ void flatAndDisabled() {
   settings.Iterations=8;settings.Strength=0;require(!relax(box(),layers,settings,sample,report,error),"Zero strength accepted");
   settings.Strength=.25;settings.MaxDeviation=-1;require(!relax(box(),layers,settings,sample,report,error),"Negative deviation accepted");
 }
+void heightDomain() {
+  auto reference=box();for(auto &p:reference.Positions)p.z*=20;
+  auto layers=stack(false);const double z[5]={0,5,10,27,40};
+  for(int k=0;k<5;++k)for(auto &p:layers[k].Positions)p.z=float(z[k]);
+  const auto original=layers;
+  const auto inside=[](const zPoint &p,zPoint *uv){if(p.x<0||p.x>4||p.y<0||p.y>4||p.z<0||p.z>40)return false;
+    if(uv)*uv=zPoint(p.x/4,p.y/4,p.z/40);return true;};
+  PrintHeightOptimizationSettings settings;settings.Enabled=true;settings.Iterations=16;
+  HeightReport report;std::string error;
+  require(optimizeHeightDomain(reference,layers,settings,inside,false,report,error),error);
+  std::cout<<"height domain "<<report.InitialMinimum<<","<<report.InitialMaximum<<" -> "<<report.Minimum<<","<<report.Maximum<<" iterations="<<report.AcceptedIterations<<'\n';
+  require(report.Converged,"Feasible planar height domain did not converge");
+  for(size_t k=0;k<layers.size();++k){require(layers[k].Triangles==original[k].Triangles,"Height correction changed topology");
+    if(k==0||k+1==layers.size())for(size_t i=0;i<layers[k].Positions.size();++i)require(norm(layers[k].Positions[i],original[k].Positions[i])==0,"Height optimizer moved a cap");
+    if(k+1<layers.size())for(float h:layers[k].Heights)require(h>=6&&h<=12,"Successful height outside supplied domain");
+    require(bending(layers[k])<1e-5,"Constant-height correction introduced surface ripples");
+  }
+  auto repeat=original;HeightReport parallelReport;
+  require(optimizeHeightDomain(reference,repeat,settings,inside,true,parallelReport,error),error);
+  for(size_t k=0;k<layers.size();++k){require(layers[k].Heights==repeat[k].Heights,"Parallel height oracle changed output");
+    for(size_t i=0;i<layers[k].Positions.size();++i)require(norm(layers[k].Positions[i],repeat[k].Positions[i])==0,"Parallel height optimizer changed geometry");}
+  std::vector<double> levels;require(redistributeIsoValues(original,settings,levels,false,error),error);
+  require(levels.front()==0&&levels.back()==1,"Iso schedule changed cap values");
+  for(size_t k=1;k<levels.size();++k)require(levels[k]>levels[k-1],"Height iso schedule is not ordered");
+  settings.Maximum=settings.Minimum;require(!optimizeHeightDomain(reference,repeat,settings,inside,false,report,error),"Degenerate height target accepted");
+  settings.Maximum=12;settings.Minimum=-1;require(!optimizeHeightDomain(reference,repeat,settings,inside,false,report,error),"Negative height target accepted");
+  settings.Minimum=std::numeric_limits<double>::quiet_NaN();require(!optimizeHeightDomain(reference,repeat,settings,inside,false,report,error),"Nonfinite target accepted");
+  settings.Minimum=6;settings.MaxDisplacement=.01;repeat=original;
+  require(optimizeHeightDomain(reference,repeat,settings,inside,false,report,error),error);
+  require(!report.Converged&&report.WorstViolation>1,"Infeasible displacement budget falsely reported compliance");
+  require(report.MaxDisplacement<=.01001,"Exceeded height correction movement budget");
+  PrintHeightOptimizationSettings exact;exact.Enabled=true;
+  for(const auto &bounds:std::vector<std::pair<double,double>>{{.5,.6},{.4,.5}}){exact.Minimum=bounds.first;exact.Maximum=bounds.second;
+    auto flat=stack(false);const auto before=flat;
+    require(optimizeHeightDomain(box(),flat,exact,sample,false,report,error),error);
+    require(report.Converged&&report.AcceptedIterations==0&&report.Minimum==.5&&report.Maximum==.5,"Exact inclusive planar bound was changed/rejected");
+    std::vector<double> schedule;require(redistributeIsoValues(before,exact,schedule,false,error),error);
+    for(size_t k=0;k<schedule.size();++k)require(std::abs(schedule[k]-.25*k)<1e-12,"Feasible exact-bound schedule was perturbed");
+  }
+  exact.Minimum=.52;exact.Maximum=.6;exact.Tolerance=.05;auto tolerant=stack(false);
+  require(optimizeHeightDomain(box(),tolerant,exact,sample,false,report,error),error);
+  require(report.Converged&&report.AcceptedIterations==0&&report.Minimum==.5&&report.Maximum==.5,"Fabrication tolerance changed/clamped measured heights");
+  exact.Tolerance=-.01;require(!optimizeHeightDomain(box(),tolerant,exact,sample,false,report,error),"Negative tolerance accepted");
+  exact.Tolerance=std::numeric_limits<double>::quiet_NaN();require(!optimizeHeightDomain(box(),tolerant,exact,sample,false,report,error),"Nonfinite tolerance accepted");
+  exact.Enabled=false;exact.Minimum=std::numeric_limits<double>::quiet_NaN();auto disabled=original;
+  require(optimizeHeightDomain(reference,disabled,exact,inside,false,report,error),error);
+  for(size_t k=0;k<disabled.size();++k){require(disabled[k].Heights==original[k].Heights,"Disabled height optimizer changed heights");
+    for(size_t i=0;i<disabled[k].Positions.size();++i)require(norm(disabled[k].Positions[i],original[k].Positions[i])==0,"Disabled height optimizer moved geometry");}
 }
-int main() {try{relaxation();flatAndDisabled();constrainedInput();return 0;}catch(const std::exception &e){std::cerr<<e.what()<<'\n';return 1;}}
+void qualityRepair() {
+  auto layers=stack(false);const auto original=layers;
+  for(int k=1;k<4;++k){layers[k].Positions[12].x=1.001f;layers[k].UV[12].x=1.001f/4;}
+  Settings settings;settings.Iterations=2;settings.MinEdgeLength=.02;settings.MaxDeviation=.02;
+  Report report;std::string error;require(relax(box(),layers,settings,sample,report,error),error);
+  for(int k=0;k<5;++k){const auto &m=layers[k];
+    if(k==0||k==4){require(m.Triangles==original[k].Triangles,"Quality repair changed a fixed cap");for(size_t i=0;i<m.Positions.size();++i)require(norm(m.Positions[i],original[k].Positions[i])==0,"Quality repair moved a cap");}
+    require(bending(m)<1e-5,"Quality repair bent a planar section");
+    for(float h:m.Heights)require(std::abs(h-.5)<1e-5,"Quality repair changed analytic spacing");
+    for(const auto &t:m.Triangles)for(int j=0;j<3;++j)require(norm(m.Positions[t[j]],m.Positions[t[(j+1)%3]])>.01,"Tiny interior edge survived quality repair");
+    require(m.BoundaryWidths.size()==original[k].BoundaryWidths.size(),"Quality repair lost semantic boundary edges");
+    for(const auto &e:m.BoundaryWidths)for(int id:{int(e.first>>32),int(e.first&0xffffffffu)}){const auto &p=m.Positions[id];
+      require((std::min)({std::abs(p.x),std::abs(p.x-4),std::abs(p.y),std::abs(p.y-4)})<1e-6,"Quality boundary left input surface");}
+  }
+  settings.MinEdgeLength=-1;require(!relax(box(),layers,settings,sample,report,error),"Negative repair length accepted");
+}
+void heightGeometryCases(){
+  for(bool narrow:{false,true}){
+    auto reference=box();auto layers=stack(false);const double level[5]={0,5,17,29,40};
+    for(auto &p:reference.Positions){p.z*=20;if(narrow)p.x*=.025f;else p.z*=1+.02f*p.x;}
+    for(int k=0;k<5;++k)for(auto &p:layers[k].Positions){p.z=float(level[k]);if(narrow)p.x*=.025f;else p.z*=1+.02f*p.x;}
+    const auto original=layers;const auto inside=[&](const zPoint &p,zPoint *uv){const double width=narrow?.1:4,top=narrow?40:40*(1+.02*p.x);
+      if(p.x<-1e-6||p.x>width+1e-6||p.y<-1e-6||p.y>4+1e-6||p.z<-1e-6||p.z>top+1e-5)return false;
+      if(uv)*uv=zPoint(p.x/width,p.y/4,p.z/top);return true;};
+    PrintHeightOptimizationSettings settings;settings.Enabled=true;settings.Tolerance=.05;settings.Iterations=32;
+    std::vector<zPointArray> targets;for(size_t k=0;k+1<layers.size();++k)targets.push_back(layers[k].Positions);
+    HeightReport report;std::string error;require(optimizeHeightDomain(reference,layers,settings,inside,false,report,error,&targets),error);
+    require(report.Converged,narrow?"Narrow stack failed height convergence":"Tilted-cap stack failed height convergence");
+    for(size_t k=0;k<layers.size();++k){if(k==0||k+1==layers.size())for(size_t i=0;i<layers[k].Positions.size();++i)
+        require(norm(layers[k].Positions[i],original[k].Positions[i])==0,"Geometry-case cap moved");
+      if(k+1<layers.size())for(float height:layers[k].Heights)require(height>=5.95&&height<=12.05,"Geometry case contains an unmeasured domain violation");}
+  }
+  auto bad=stack(false);bad[2].Triangles[0][1]=bad[2].Triangles[0][0];PrintHeightOptimizationSettings settings;settings.Enabled=true;
+  HeightReport report;std::string error;require(!optimizeHeightDomain(box(),bad,settings,sample,false,report,error),"Degenerate height-support triangle accepted");
+}
+}
+int main() {try{relaxation();flatAndDisabled();constrainedInput();heightDomain();qualityRepair();heightGeometryCases();return 0;}catch(const std::exception &e){std::cerr<<e.what()<<'\n';return 1;}}

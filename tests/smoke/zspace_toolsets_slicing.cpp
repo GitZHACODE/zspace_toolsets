@@ -200,7 +200,7 @@ void tetRefinement() {
   }
   const double sourceEdge = zTsUtils::meanEdgeLength(original, triangles);
   size_t coarseCount = 0;
-  require(SlicerSettings{}._HTetEdgeLengthScale == 0.5, "Unexpected default tet refinement");
+  require(SlicerSettings{}._HTetEdgeLengthScale == 1.0, "Unexpected default tet refinement");
   for (double scale : {1.0, 0.75, 0.5}) {
     zTsSlicing session;
     configure(session, mesh);
@@ -410,6 +410,48 @@ void harmonic() {
           slicer->getPrintHeightDomain().max == 0 && slicer->getPrintVolume() == 0,
           "Settings invalidation retained stale harmonic heights/statistics");
   require(!slicer->computePrintPath(false), "Paths computed without height tables/contours");
+
+  // The full harmonic entry point validates processed targets, including
+  // exact inclusive bounds, rather than merely clamping their attributes.
+  for(const auto &bounds:std::vector<std::pair<double,double>>{{.45,.55},{.45,.5},{double(std::nextafter(.5f,0.f)),.55}}){
+    zTsSlicing bounded;configure(bounded,mesh);bounded.setSlicerMode(zTsSlicerMode::Harmonic);
+    auto &target=bounded.getSettings().HPrintHeight;target.Enabled=true;target.Minimum=bounds.first;target.Maximum=bounds.second;
+    require(bounded.computeSlicer(false),bounded.getStatus());require(bounded.computePostProcess(false),bounded.getStatus());
+    require(bounded.getHarmonicSlicer()->getPrintHeightOptimizationReport().Converged,"Successful harmonic output is not compliant");
+    for(float h:bounded.getResultantPrintPath().heights)require(h>=bounds.first&&h<=bounds.second,"Final harmonic target escaped inclusive bounds");
+  }
+  zTsSlicing impossible;configure(impossible,mesh);impossible.setSlicerMode(zTsSlicerMode::Harmonic);
+  auto &target=impossible.getSettings().HPrintHeight;target.Enabled=true;target.Minimum=.8;target.Maximum=1;target.MaxDisplacement=.001;target.AllowLayerCountChange=false;
+  require(impossible.computeSlicer(false),impossible.getStatus());
+  require(!impossible.computePostProcess(false),"Infeasible harmonic domain accepted");
+  require(zFnGraph(const_cast<PrintPath&>(impossible.getResultantPrintPath()).graph).numVertices()==0&&!impossible.hasPrintStatistics(),"Infeasible output retained a fabrication path/statistics");
+  zTsSlicing adaptive;configure(adaptive,mesh);adaptive.setSlicerMode(zTsSlicerMode::Harmonic);
+  auto &adaptiveTarget=adaptive.getSettings().HPrintHeight;adaptiveTarget=target;adaptiveTarget.AllowLayerCountChange=true;
+  require(adaptive.computeSlicer(false)&&adaptive.computePostProcess(false),adaptive.getStatus());
+  require(adaptive.getHarmonicSlicer()->getIsoMeshes().size()<impossible.getHarmonicSlicer()->getIsoMeshes().size(),"Adaptive count did not remove an unnecessary layer");
+  for(float h:adaptive.getResultantPrintPath().heights)require(h>=.8&&h<=1,"Count adaptation claimed a false domain");
+  zTsSlicing scheduled;configure(scheduled,mesh);scheduled.setSlicerMode(zTsSlicerMode::Harmonic);
+  auto &schedule=scheduled.getSettings().HPrintHeight;schedule=target;schedule.OptimizeSurfaces=false;
+  require(scheduled.computeSlicer(false)&&scheduled.computePostProcess(false),scheduled.getStatus());
+  require(scheduled.getHarmonicSlicer()->getPrintHeightOptimizationReport().AcceptedIterations==0,"Scheduling-only mode moved surfaces for the target domain");
+  target.Maximum=target.Minimum;require(!impossible.computeSlicer(false),"Degenerate harmonic domain accepted");
+  zTsSlicing unaffected;configure(unaffected,mesh);unaffected.getSettings().HPrintHeight.Enabled=true;unaffected.getSettings().HPrintHeight.Minimum=-1;
+  require(unaffected.computeSlicer(false)&&unaffected.computePostProcess(false),"Harmonic-only target changed topology slicing");
+
+  auto roof=block();zFnMesh roofFn(roof);roofFn.getRawVertexPositions()[10].z=2.7f;
+  zTsSlicing coarse,capFixed;configure(coarse,roof);configure(capFixed,roof);coarse.setSlicerMode(zTsSlicerMode::Harmonic);capFixed.setSlicerMode(zTsSlicerMode::Harmonic);
+  capFixed.getSettings().HPrintHeight.Enabled=true;capFixed.getSettings().HPrintHeight.Minimum=.2;capFixed.getSettings().HPrintHeight.Maximum=.7;
+  require(coarse.computeBasicStructure(false)&&capFixed.computeBasicStructure(false),"Roof cap refinement failed");
+  const auto &before=coarse.getHarmonicSlicer()->getTetVolume(),&after=capFixed.getHarmonicSlicer()->getTetVolume();
+  const auto capOnly=[](const HarmonicField &t){int count=0;for(const auto &cell:t.Volumes)if(cell.Valid){const int tag=t.vertextag[cell.VertexIds[0]];bool same=tag==Bottom||tag==Top;for(int id:cell.VertexIds)same&=t.vertextag[id]==tag;count+=same;}return count;};
+  const int repaired=capOnly(before);require(capOnly(after)==0,"Finite-volume fixed-cap pocket survived refinement");
+  require(after.Vertices.size()==before.Vertices.size()+repaired&&after.Volumes.size()==before.Volumes.size()+4*repaired,"Cap refinement was not a local internal-face split");
+  require(before.Surface.Triangles==after.Surface.Triangles&&before.Surface.Positions.size()==after.Surface.Positions.size(),"Cap repair changed exterior connectivity");
+  for(size_t i=0;i<before.Surface.Positions.size();++i){const auto &a=before.Surface.Positions[i],&b=after.Surface.Positions[i];require(a.x==b.x&&a.y==b.y&&a.z==b.z,"Cap repair moved the input surface");}
+  double volumeBefore=0,volumeAfter=0;for(const auto &t:before.Volumes)if(t.Valid)volumeBefore+=t.Volume;for(const auto &t:after.Volumes)if(t.Valid)volumeAfter+=t.Volume;
+  require(std::abs(volumeAfter-volumeBefore)<1e-8*volumeBefore,"Cap repair changed enclosed volume");
+  require(capFixed.getHarmonicSlicer()->computeHarmonicField(),"Cap-repaired field solve failed");
+  for(size_t i=before.Vertices.size();i<after.Vertices.size();++i)require(after.vertextag[i]==Interior&&after.UVW[i].z>0&&after.UVW[i].z<1,"New cap-interface node did not gain a free field value");
 #endif
 }
 }

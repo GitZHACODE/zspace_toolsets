@@ -74,7 +74,10 @@ std::string formatPrintPathUSDA(const std::string &text) {
       for (char &c : values) if (c == '[' || c == ']' || c == ',') c = ' ';
       std::istringstream numbers(values);
       double value;
-      output << line.substr(0, equals + 2) << std::fixed << std::setprecision(2);
+      output << line.substr(0, equals + 2);
+      // Preserve reusable domain precision, including metre-based stages.
+      if(declaration.find("double[] printheightdomain = ")==0)output<<std::defaultfloat<<std::setprecision(17);
+      else output<<std::fixed<<std::setprecision(2);
       if (statisticArray) output << '[';
       bool firstValue = true;
       while (numbers >> value) {
@@ -239,8 +242,8 @@ ZSPACE_INLINE bool exportPrintPathUSD(const PrintPath &path,
     auto metadata = stage->GetRootLayer()->GetCustomLayerData();
     const auto round2 = [](double value) { return std::round(value * 100.0) / 100.0; };
     pxr::VtArray<double> heightDomain, widthDomain;
-    heightDomain.push_back(round2(*heightRange.first));
-    heightDomain.push_back(round2(*heightRange.second));
+    heightDomain.push_back(*heightRange.first);
+    heightDomain.push_back(*heightRange.second);
     widthDomain.push_back(round2(*widthRange.first));
     widthDomain.push_back(round2(*widthRange.second));
     metadata["blockid"] = pxr::VtValue(blockid);
@@ -454,6 +457,17 @@ ZSPACE_INLINE bool readSlicerInputUSD(const std::string &filePath, SlicerUSDInpu
     // Geometry and dimensional settings returned by this reader are always mm.
     // MetersPerUnit retains the original stage unit for callers/export.
     const double toMillimetres = out.MetersPerUnit * 1000.0;
+    const auto metadata=stage->GetRootLayer()->GetCustomLayerData();
+    const auto heightDomain=metadata.find("printheightdomain");
+    if(heightDomain!=metadata.end()){
+      if(!heightDomain->second.IsHolding<pxr::VtArray<double>>())
+        throw std::runtime_error("customLayerData printheightdomain must be double[2].");
+      const auto &domain=heightDomain->second.UncheckedGet<pxr::VtArray<double>>();
+      if(domain.size()!=2)throw std::runtime_error("customLayerData printheightdomain must have two values.");
+      for(double value:domain){const double mm=value*toMillimetres;
+        if(!std::isfinite(mm)||mm<0)throw std::runtime_error("printheightdomain must contain finite nonnegative lengths.");out.PrintHeightDomain.push_back(mm);}
+      if(out.PrintHeightDomain[0]>out.PrintHeightDomain[1])throw std::runtime_error("printheightdomain minimum exceeds maximum.");
+    }
     const auto scaleSetting = [&](const char *group, const char *key) {
       auto &values = settings[group];
       if (!values.contains(key)) return;
@@ -469,7 +483,7 @@ ZSPACE_INLINE bool readSlicerInputUSD(const std::string &filePath, SlicerUSDInpu
     };
     for (const char *key : {"BoundaryWidth", "BracingWidth", "BracingCurveWidths", "OverlapWidth", "FieldCellSize", "LayerSpacing"})
       scaleSetting("slicer", key);
-    for (const char *key : {"ResampleLength", "SeamOffset", "SeamSize"})
+    for (const char *key : {"ResampleLength", "SurfaceChordTolerance", "SeamOffset", "SeamSize"})
       scaleSetting("printSyn", key);
     out.SettingsJSON = settings.dump();
     const auto data = stage->GetPrimAtPath(pxr::SdfPath("/Slicer_data"));

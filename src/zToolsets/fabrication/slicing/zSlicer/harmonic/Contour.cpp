@@ -165,6 +165,24 @@ ZSPACE_INLINE void HarmonicSlicer::extractIsoMesh(float iso, zObjMesh &mesh, zPo
   heights.clear();
   edgeIds.clear();
   if (!slice.Counts.empty()) {
+    // A crossing may belong only to a discarded degenerate triangle. Keep
+    // vertices supported by surviving faces, with all provenance aligned.
+    std::vector<int> remap(slice.Positions.size(), -1);
+    for (int id : slice.Connects) remap[id] = 0;
+    int used = 0;
+    for (size_t id = 0; id < remap.size(); ++id) if (remap[id] >= 0) {
+      remap[id] = used;
+      slice.Positions[used] = slice.Positions[id];
+      slice.UV[used] = slice.UV[id];
+      slice.Heights[used] = slice.Heights[id];
+      slice.TetEdges[used] = slice.TetEdges[id];
+      ++used;
+    }
+    for (int &id : slice.Connects) id = remap[id];
+    slice.Positions.resize(used);
+    slice.UV.resize(used);
+    slice.Heights.resize(used);
+    slice.TetEdges.resize(used);
     extractWidthId(slice.Connects, slice.Counts, slice.TetEdges, lookup, edgeIds, debug);
     fn.create(slice.Positions, slice.Counts, slice.Connects);
     uv.swap(slice.UV);
@@ -522,7 +540,11 @@ ZSPACE_INLINE bool HarmonicSlicer::computeContours(bool useParallel) {
   double shortest = 0.0, longest = 0.0;
   const int interiorCount = columnLengths(shortest, longest)
       ? std::max(0, layersFromSpacing(shortest, i_Settings.LayerSpacing) - 2) : 0;
-  const int numLayers = interiorCount + 2;
+  const int numLayers = _RequestedSectionCount>0?_RequestedSectionCount:interiorCount+2;
+  _RequestedSectionCount=0;
+  if(i_Settings.HPrintHeight.Enabled&&i_Settings._HIsoRelaxIterations==0){
+    _Status="computeContours failed: height optimization requires enabled iso relaxation.";return false;
+  }
   zFloatArray vertexHeights;
   if (!computeVertexLayerHeights(numLayers, vertexHeights)) {
     _Status = "computeContours failed: harmonic gradients cannot provide finite positive layer heights.";
@@ -540,6 +562,7 @@ ZSPACE_INLINE bool HarmonicSlicer::computeContours(bool useParallel) {
   o_IsoMeshBoundaryWidthId.assign(numLayers, zIntArray());
   std::vector<char> generated(numLayers, 0);
   std::vector<std::vector<std::string>> layerDebug(numLayers);
+  _IsoValues.resize(numLayers);for(int k=0;k<numLayers;++k)_IsoValues[k]=double(k)/(numLayers-1);
 
   WallWidthLookup lookup;
   // buildTetVolume preserves input side-face width IDs on the refined surface;
@@ -565,19 +588,43 @@ ZSPACE_INLINE bool HarmonicSlicer::computeContours(bool useParallel) {
                        o_IsoMeshes[k], o_IsoMeshUV[k], vertexHeights, o_VertexLayerHeights[k],
                        lookup, _HarmonicIsoEdgeWidthIds[k], layerDebug[k]);
       } else {
-        const float iso = static_cast<float>(k) / static_cast<float>(numLayers - 1);
+        const float iso = static_cast<float>(_IsoValues[k]);
         extractIsoMesh(iso, o_IsoMeshes[k], o_IsoMeshUV[k], vertexHeights, o_VertexLayerHeights[k],
                        lookup, _HarmonicIsoEdgeWidthIds[k], layerDebug[k]);
       }
     } catch (...) { parallelErrors1.capture(k); }
   }
   parallelErrors1.rethrow();
+  if(i_Settings.HPrintHeight.Enabled&&i_Settings.HPrintHeight.RedistributeIsoValues){
+    std::string error;
+    if(!zTsRelax::redistributeIsoValues(relaxationLayers(),i_Settings.HPrintHeight,_IsoValues,useParallel,error)){
+      _Status="computeContours failed: height iso schedule: "+error;return false;
+    }
+    zTsDetail::ParallelErrors scheduleErrors(numLayers);
+    #pragma omp parallel for schedule(dynamic) if(useParallel)
+    for(int k=1;k<numLayers-1;++k){try{
+      _HarmonicIsoEdgeWidthIds[k].clear();layerDebug[k].clear();
+      extractIsoMesh(float(_IsoValues[k]),o_IsoMeshes[k],o_IsoMeshUV[k],vertexHeights,o_VertexLayerHeights[k],lookup,_HarmonicIsoEdgeWidthIds[k],layerDebug[k]);
+    }catch(...){scheduleErrors.capture(k);}}
+    scheduleErrors.rethrow();
+  }
   std::string relaxationError;
-  if (!relaxContours(relaxationError, useParallel)) {
+  bool relaxed=relaxContours(relaxationError,useParallel);
+  if(!relaxed&&i_Settings.HPrintHeight.Enabled&&i_Settings.HPrintHeight.RedistributeIsoValues){
+    printDebug("[heightOptimizer] Scheduled seed rejected ("+relaxationError+"); restoring uniform iso values.");
+    for(int k=1;k<numLayers-1;++k){_IsoValues[k]=double(k)/(numLayers-1);_HarmonicIsoEdgeWidthIds[k].clear();layerDebug[k].clear();
+      extractIsoMesh(float(_IsoValues[k]),o_IsoMeshes[k],o_IsoMeshUV[k],vertexHeights,o_VertexLayerHeights[k],lookup,_HarmonicIsoEdgeWidthIds[k],layerDebug[k]);}
+    relaxationError.clear();relaxed=relaxContours(relaxationError,useParallel);
+  }
+  if (!relaxed) {
     clearContours();
     _Status = "computeContours failed: iso relaxation: " + relaxationError;
     printDebug("[computeContours] " + _Status);
     return false;
+  }
+  if(i_Settings.HPrintHeight.Enabled&&i_Settings.HPrintHeight.OptimizeSurfaces){
+    std::string error;if(!optimizeSurfaceHeightDomain(nullptr,error,useParallel)){
+      _Status="computeContours failed: surface height optimization: "+error;return false;}
   }
   zTsDetail::ParallelErrors parallelUnroll(numLayers);
   #pragma omp parallel for schedule(dynamic) if(useParallel)

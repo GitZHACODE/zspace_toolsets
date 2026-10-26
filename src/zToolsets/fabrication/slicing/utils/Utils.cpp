@@ -16,6 +16,7 @@
 
 #include <zspace/zToolsets/fabrication/slicing/utils/Parallel.h>
 #include <zspace/zToolsets/fabrication/slicing/utils/Utils.h>
+#include "Interpolation.h"
 
 #ifndef ZSPACE_INLINE
 #define ZSPACE_INLINE ZSPACE_TOOLSETS_INLINE
@@ -895,7 +896,8 @@ ZSPACE_INLINE bool realizeParameterGraph(const ParameterGraph &inParams,
           (bv.v1 < (int)vertexHeights->size()) ? (*vertexHeights)[bv.v1] : 0.0f;
       float h2 =
           (bv.v2 < (int)vertexHeights->size()) ? (*vertexHeights)[bv.v2] : 0.0f;
-      (*outHeights)[i] = bv.u * h0 + bv.v * h1 + bv.w * h2;
+      (*outHeights)[i] = float(zTsDetail::interpolateScalar(h0,h1,h2,bv.u,bv.v,bv.w));
+      if(!std::isfinite((*outHeights)[i]))return false;
     }
 
     if (outNormals) {

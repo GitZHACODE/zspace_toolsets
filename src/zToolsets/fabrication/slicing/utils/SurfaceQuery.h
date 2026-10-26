@@ -51,6 +51,55 @@ public:
       else for(int j=node.Begin;j<node.End;++j){const int id=order_[j];if(boxes_[id].distance(p)>best)continue;const V q=closest(p,triangles_[id]);const double d=(q-p).squaredNorm();
         if(d<best){best=d;hit.Triangle=id;hit.Position=q;hit.Weights=weights(q,triangles_[id]);}}
     }hit.Distance=std::sqrt(best);return hit.Triangle>=0;}
+  // Preserve strict chart correspondence: containing triangles may agree on a
+  // shared edge/vertex, but distinct interpolation supports are ambiguous.
+  bool uniqueChartHit(const zPoint &position,Hit &hit,double tolerance)const{
+    if(!nearest(position,hit)||hit.Distance>tolerance)return false;
+    const V p=zTsUtils::toEigenVec(position);const auto &selected=triangles_[hit.Triangle];
+    const auto compatible=[&](const Triangle &a,const V &aw,const Triangle &b,const V &bw){
+      for(int j=0;j<3;++j)if(aw[j]>1e-4){bool shared=false;
+        for(int k=0;k<3;++k)shared|=a.Ids[j]==b.Ids[k]&&bw[k]>1e-4;
+        if(!shared)return false;}return true;};
+    std::array<int,64> stack;int size=0;stack[size++]=0;
+    while(size){const auto &node=nodes_[stack[--size]];if(node.Bounds.distance(p)>tolerance*tolerance)continue;
+      if(node.Left>=0){stack[size++]=node.Left;stack[size++]=node.Right;continue;}
+      for(int j=node.Begin;j<node.End;++j){const auto &candidate=triangles_[order_[j]];
+        if(boxes_[order_[j]].distance(p)>tolerance*tolerance)continue;
+        const double height=(p-candidate.P[0]).dot(candidate.Normal);
+        if(std::abs(height)>tolerance)continue;const V bary=weights(p-height*candidate.Normal,candidate);
+        if(bary.minCoeff()<-1e-12)continue;
+        if(!compatible(candidate,bary,selected,hit.Weights)||!compatible(selected,hit.Weights,candidate,bary))return false;
+      }}return true;
+  }
   const Triangle &triangle(int id)const{return triangles_[id];}
+  // Exact break parameters of a straight chart segment. The map is affine
+  // between successive breaks, so chord-error tests need only these points.
+  // BVH clipping visits crossed triangles, not the complete chart.
+  bool chartSegment(const zPoint &a,const zPoint &b,double tolerance,
+                    std::vector<double> &parameters)const{
+    parameters={0,1};if(nodes_.empty())return false;
+    const V p=zTsUtils::toEigenVec(a),q=zTsUtils::toEigenVec(b);
+    const V low=p.cwiseMin(q)-V::Constant(tolerance),high=p.cwiseMax(q)+V::Constant(tolerance);
+    std::array<int,64> stack;int count=0;stack[count++]=0;
+    while(count){const Node &node=nodes_[stack[--count]];
+      if((node.Bounds.Hi.array()<low.array()).any()||(node.Bounds.Lo.array()>high.array()).any())continue;
+      if(node.Left>=0){stack[count++]=node.Left;stack[count++]=node.Right;continue;}
+      for(int j=node.Begin;j<node.End;++j){const auto &t=triangles_[order_[j]];
+        if(std::abs((p-t.P[0]).dot(t.Normal))>tolerance||std::abs((q-t.P[0]).dot(t.Normal))>tolerance)continue;
+        const V w=weights(p,t),delta=weights(q,t)-w;double first=0,last=1;
+        for(int c=0;c<3;++c){if(std::abs(delta[c])<1e-15){if(w[c]<-1e-10){last=-1;break;}}
+          else if(delta[c]>0)first=(std::max)(first,-w[c]/delta[c]);
+          else last=(std::min)(last,-w[c]/delta[c]);}
+        if(last>first+1e-12){parameters.push_back(std::clamp(first,0.0,1.0));parameters.push_back(std::clamp(last,0.0,1.0));}
+      }
+    }
+    std::sort(parameters.begin(),parameters.end());
+    parameters.erase(std::unique(parameters.begin(),parameters.end(),[](double x,double y){return std::abs(x-y)<1e-10;}),parameters.end());
+    // Validate interval interiors, including overlaps whose endpoints happen
+    // to have unique supports. Shared triangulation edges remain legal.
+    for(size_t j=1;j<parameters.size();++j){const double t=.5*(parameters[j-1]+parameters[j]);const V mid=p+t*(q-p);Hit hit;
+      if(!uniqueChartHit(zPoint(mid.x(),mid.y(),mid.z()),hit,tolerance))return false;}
+    return true;
+  }
 };
 } }

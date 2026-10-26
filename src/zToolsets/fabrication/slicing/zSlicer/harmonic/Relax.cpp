@@ -51,26 +51,37 @@ public:
 };
 }
 
+std::vector<zTsRelax::Layer> HarmonicSlicer::relaxationLayers() const {
+  std::vector<zTsRelax::Layer> layers(o_IsoMeshes.size());
+  for(size_t k=0;k<layers.size();++k){auto &layer=layers[k];zFnMesh fn(const_cast<zObjMesh&>(o_IsoMeshes[k]));fn.getVertexPositions(layer.Positions);
+    zIntArray connects,counts;fn.getPolygonData(connects,counts);size_t offset=0;
+    for(int count:counts){if(count!=3)throw std::runtime_error("Iso relaxation requires triangulated layers.");
+      layer.Triangles.push_back({connects[offset],connects[offset+1],connects[offset+2]});offset+=count;}
+    layer.UV=o_IsoMeshUV[k];layer.Heights=o_VertexLayerHeights[k];layer.BoundaryWidths=_HarmonicIsoEdgeWidthIds[k];
+  }
+  return layers;
+}
+
 bool HarmonicSlicer::relaxContours(std::string &error, bool useParallel) {
   o_VertexLayerNormals.assign(o_IsoMeshes.size(),zVectorArray());
   zTsRelax::Settings settings;
   settings.Iterations=i_Settings._HIsoRelaxIterations;
   settings.Strength=i_Settings._HIsoRelaxStrength;
   settings.MaxDeviation=i_Settings._HIsoRelaxMaxDeviation;
+  // Sliver preconditioning belongs to the optional surface-height solver.
+  // Iso-value redistribution alone keeps the ordinary relaxation mesh.
+  if(i_Settings.HPrintHeight.Enabled&&i_Settings.HPrintHeight.OptimizeSurfaces)
+    settings.MinEdgeLength=.05*i_Settings.HPrintHeight.Minimum;
   settings.Parallel=useParallel;
   zTsRelax::Reference reference;reference.Positions=_Tet.Surface.Positions;reference.Triangles=_Tet.Surface.Triangles;
   for(int face:_Tet.SurfaceFaceIds)reference.WidthIds.push_back(_Tet.FaceTags[face]==HarmonicField::TetFaceTag::Side?_Tet.FaceWidthIds[face]:-1);
-  std::vector<zTsRelax::Layer> layers(o_IsoMeshes.size());
-  for(size_t k=0;k<layers.size();++k){auto &layer=layers[k];zFnMesh fn(o_IsoMeshes[k]);fn.getVertexPositions(layer.Positions);
-    zIntArray connects,counts;fn.getPolygonData(connects,counts);size_t offset=0;
-    for(int count:counts){if(count!=3){error="Iso relaxation requires triangulated layers.";return false;}
-      layer.Triangles.push_back({connects[offset],connects[offset+1],connects[offset+2]});offset+=count;}
-    layer.UV=o_IsoMeshUV[k];layer.Heights=o_VertexLayerHeights[k];layer.BoundaryWidths=_HarmonicIsoEdgeWidthIds[k];
-  }
+  auto layers=relaxationLayers();
   TetSampler sampler(_Tet);
   if(!zTsRelax::relax(reference,layers,settings,[&](const zPoint &p,zPoint *uv){return sampler.sample(p,uv);},_IsoRelaxationReport,error))return false;
   if(settings.Iterations==0)return true;
-  for(size_t k=0;k<layers.size();++k){if(k>0&&k+1<layers.size())zFnMesh(o_IsoMeshes[k]).setVertexPositions(layers[k].Positions);
+  for(size_t k=0;k<layers.size();++k){if(k>0&&k+1<layers.size()){
+      if(settings.MinEdgeLength>0){zIntArray counts(layers[k].Triangles.size(),3),connects;for(const auto &t:layers[k].Triangles)connects.insert(connects.end(),t.begin(),t.end());zFnMesh(o_IsoMeshes[k]).create(layers[k].Positions,counts,connects);}
+      else zFnMesh(o_IsoMeshes[k]).setVertexPositions(layers[k].Positions);}
     _HarmonicIsoEdgeWidthIds[k].swap(layers[k].BoundaryWidths);
     o_IsoMeshUV[k].swap(layers[k].UV);o_VertexLayerHeights[k].swap(layers[k].Heights);o_VertexLayerNormals[k].swap(layers[k].Normals);}
   std::ostringstream report;report<<"[relaxContours] iterations="<<_IsoRelaxationReport.AcceptedIterations
@@ -85,5 +96,25 @@ bool HarmonicSlicer::relaxContours(std::string &error, bool useParallel) {
       <<" lastRejectedStep="<<_IsoRelaxationReport.LastRejectedReason
       <<" boundaryHeightPlaneEstimates="<<_IsoRelaxationReport.PlaneHeightEstimates;
   zTsUtils::printDebug(report.str());return true;
+}
+
+bool HarmonicSlicer::optimizeSurfaceHeightDomain(const std::vector<zPointArray> *targets,std::string &error,bool parallel){
+  zTsRelax::Reference reference;reference.Positions=_Tet.Surface.Positions;reference.Triangles=_Tet.Surface.Triangles;
+  for(int face:_Tet.SurfaceFaceIds)reference.WidthIds.push_back(_Tet.FaceTags[face]==HarmonicField::TetFaceTag::Side?_Tet.FaceWidthIds[face]:-1);
+  auto layers=relaxationLayers();TetSampler sampler(_Tet);
+  auto settings=i_Settings.HPrintHeight;
+  if(!targets)settings.Iterations=(std::min)(settings.Iterations,8);
+  else if(settings.Tolerance>0){
+    // Keep a small guide margin for float storage and a rebuilt chart. Final
+    // acceptance still uses the original user domain, on the complete curves.
+    const double inset=(std::min)(.05*(settings.Maximum-settings.Minimum),.5*settings.Tolerance);
+    settings.Minimum+=inset;settings.Maximum-=inset;
+  }
+  if(!zTsRelax::optimizeHeightDomain(reference,layers,settings,[&](const zPoint &p,zPoint *uv){return sampler.sample(p,uv);},parallel,_PrintHeightOptimizationReport,error,targets,i_Settings._HIsoRelaxStrength))return false;
+  for(size_t k=0;k<layers.size();++k){if(k>0&&k+1<layers.size())zFnMesh(o_IsoMeshes[k]).setVertexPositions(layers[k].Positions);
+    o_IsoMeshUV[k].swap(layers[k].UV);o_VertexLayerHeights[k].swap(layers[k].Heights);o_VertexLayerNormals[k].swap(layers[k].Normals);}
+  const auto &h=_PrintHeightOptimizationReport;std::ostringstream message;message<<"[surfaceHeightOptimizer] iterations="<<h.AcceptedIterations<<" factors="<<h.Factorizations<<" domain=["<<h.Minimum<<","<<h.Maximum
+    <<"] violations="<<h.ViolatingVertices<<" worst="<<h.WorstViolation<<" timeMs="<<h.Milliseconds<<" constrained="<<h.LastRejectedReason;
+  zTsUtils::printDebug(message.str());return true;
 }
 } // namespace zSpace

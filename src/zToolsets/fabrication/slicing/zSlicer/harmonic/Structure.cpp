@@ -247,6 +247,46 @@ ZSPACE_INLINE bool HarmonicSlicer::buildTetVolume() {
   _Tet.SurfaceWidthIds = boundaryFaceWidthIds;
   _Tet.SurfaceTags = std::move(boundaryTags);
 
+  if(i_Settings.HPrintHeight.Enabled){
+    // A P1 element with four vertices on the same Dirichlet cap is constant
+    // throughout a finite volume. Split an INTERNAL face shared with a
+    // nonconstant neighbour, adding a free face-centre DOF to both elements.
+    // Six children exactly partition their parents; exterior facets/IDs stay
+    // intact. A cell-centre alone would still have only fixed-cap neighbours.
+    using FaceKey=std::array<int,3>;
+    const auto determinant=[&](int t){const auto &v=_Tet.Volumes[t].VertexIds;const auto a=toEigenVec(_Tet.Vertices[v[0]].Position);
+      return std::abs((toEigenVec(_Tet.Vertices[v[1]].Position)-a).dot((toEigenVec(_Tet.Vertices[v[2]].Position)-a).cross(toEigenVec(_Tet.Vertices[v[3]].Position)-a)));};
+    const auto capTag=[&](int t){const auto &v=_Tet.Volumes[t].VertexIds;const int tag=_Tet.vertextag[v[0]];
+      if(tag!=int(VertexTag::Bottom)&&tag!=int(VertexTag::Top))return 0;for(int id:v)if(_Tet.vertextag[id]!=tag)return 0;
+      return determinant(t)>=1e-5?tag:0;};
+    int inserted=0;
+    for(int pass=0;pass<32;++pass){const int count=int(_Tet.Volumes.size());int remaining=0;for(int t=0;t<count;++t)remaining+=capTag(t)!=0;if(!remaining)break;
+      std::unordered_map<FaceKey,std::pair<int,int>,TriangleKeyHash> adjacency;adjacency.reserve(4*count);
+      for(int t=0;t<count;++t)for(const auto &corners:kFaceCorners){const auto &v=_Tet.Volumes[t].VertexIds;FaceKey key{v[corners[0]],v[corners[1]],v[corners[2]]};std::sort(key.begin(),key.end());
+        const auto entry=adjacency.emplace(key,std::make_pair(t,-1));if(!entry.second)entry.first->second.second=t;}
+      struct Split {FaceKey Face;int A,B,OppA,OppB;};std::vector<Split> splits;std::vector<char> used(count,0);
+      for(int t=0;t<count;++t){const int tag=capTag(t);if(!tag||used[t])continue;double area=0;Split best{};bool found=false;
+        const auto &v=_Tet.Volumes[t].VertexIds;
+        for(const auto &corners:kFaceCorners){FaceKey key{v[corners[0]],v[corners[1]],v[corners[2]]};std::sort(key.begin(),key.end());const auto pair=adjacency.at(key);
+          const int other=pair.first==t?pair.second:pair.first;if(other<0||used[other]||capTag(other)==tag||determinant(other)<1e-5)continue;
+          const auto a=toEigenVec(_Tet.Vertices[key[0]].Position);const double next=(toEigenVec(_Tet.Vertices[key[1]].Position)-a).cross(toEigenVec(_Tet.Vertices[key[2]].Position)-a).squaredNorm();
+          if(next<=area)continue;int opposite=-1;for(int id:_Tet.Volumes[other].VertexIds)if(std::find(key.begin(),key.end(),id)==key.end())opposite=id;
+          if(opposite<0)continue;best={key,t,other,v[corners[3]],opposite};area=next;found=true;
+        }
+        if(found){splits.push_back(best);used[best.A]=used[best.B]=1;}
+      }
+      if(splits.empty()){_Status="Height optimizer cannot resolve a cap-only tetrahedral region.";return false;}
+      for(const auto &split:splits){Eigen::Vector3d p=Eigen::Vector3d::Zero();for(int id:split.Face)p+=toEigenVec(_Tet.Vertices[id].Position)/3;
+        const int center=int(_Tet.Vertices.size());zTetrahedron::TetVertex vertex;vertex.Position=zPoint(p.x(),p.y(),p.z());_Tet.Vertices.push_back(vertex);_Tet.vertextag.push_back(int(VertexTag::Interior));
+        for(int parent=0;parent<2;++parent){const int id=parent?split.B:split.A,opposite=parent?split.OppB:split.OppA;
+          for(int j=0;j<3;++j){zTetrahedron::TetVolume child;child.VertexIds={split.Face[j],split.Face[(j+1)%3],center,opposite};if(j==0)_Tet.Volumes[id]=child;else _Tet.Volumes.push_back(child);}}
+        ++inserted;
+      }
+    }
+    for(int t=0;t<int(_Tet.Volumes.size());++t)if(capTag(t)){_Status="Height optimizer cap refinement exceeded its bounded pass count.";return false;}
+    if(inserted)printDebug("[heightOptimizer] Added "+std::to_string(inserted)+" free internal cap-interface nodes.");
+  }
+
   return !_Tet.Volumes.empty() && buildTetTopology();
 }
 
@@ -479,6 +519,8 @@ ZSPACE_INLINE void HarmonicSlicer::clearContours() {
   o_VertexLayerHeights.clear();
   o_VertexLayerNormals.clear();
   _IsoRelaxationReport = zTsRelax::Report();
+  _PrintHeightOptimizationReport = zTsRelax::HeightReport();
+  _IsoValues.clear();
   _HarmonicIsoEdgeWidthIds.clear();
 }
 
