@@ -21,3 +21,13 @@ Read [C-Tubes initial port](ctubes-port.md) for the C++ toolset boundary, [Tools
 The [kernel graph ribbon implementation](https://app.gitbook.com/s/FKPJDjBzZtKzxuy72aOX/graph-mesh) is a shared geometry operation; toolset-specific fitting and project constraints remain in this repository.
 
 [Source repository and review branch](https://github.com/GitZHACODE/zspace_toolsets/tree/docs/gitbook-site-sync)
+
+### Code documentation
+
+Read the architecture and ownership guides, then use the source-derived API reference. The source-version page records the code revision and generation scope.
+
+[Code Documentation](code/)
+
+[Architecture and API ownership](code/architecture-guide.md)
+
+[Source versions and generation](code/generation.md)
