@@ -1,7 +1,7 @@
 # Table of contents
 
 * [Project Toolsets](README.md)
-* [Code Documentation](code/README.md)
+* [Code documentation](code/README.md)
   * [Fabrication APIs](code/group-fabrication/README.md)
     * [z3DPPrintSynthesis](code/group-fabrication/api-z3dpprintsynthesis.md)
     * [z3DPSettings](code/group-fabrication/api-z3dpsettings.md)
