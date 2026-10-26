@@ -25,7 +25,10 @@ list(APPEND sources ${slicing_sources})
 list(APPEND sources "${TOOLSETS_ROOT}/src/zToolsets/fabrication/slicing/utils/IO.cpp")
 add_executable(zspace_toolset ${sources} "${CMAKE_CURRENT_SOURCE_DIR}/zspace_slicing_bridge.cpp")
 zspace_wasm_configure_compilation(zspace_toolset)
-target_link_libraries(zspace_toolset PRIVATE zspace_core_wasm_objects)
+# The compilation helper already adds the executable's OpenUSD link closure.
+# Consume Core's objects directly so its private whole-archive dependencies
+# are not linked a second time through the object library interface.
+target_sources(zspace_toolset PRIVATE $<TARGET_OBJECTS:zspace_core_wasm_objects>)
 set_target_properties(zspace_toolset PROPERTIES
   SUFFIX ".js" RUNTIME_OUTPUT_DIRECTORY "${TOOLSETS_ROOT}/wasm/out")
 target_compile_definitions(zspace_toolset PRIVATE ZSPACE_TOOLSETS_WITH_USD_IO)

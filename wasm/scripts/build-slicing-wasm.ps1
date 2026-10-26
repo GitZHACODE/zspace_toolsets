@@ -19,6 +19,8 @@ if (!$ninja) { $ninja = 'C:/Program Files/Microsoft Visual Studio/2022/Professio
 $env:EM_CONFIG = Join-Path $EmsdkDir '.emscripten'
 $env:EMSDK_PYTHON = $python
 $env:EM_CACHE = "$root/wasm/cache/emscripten"
+$env:EMCC_TEMP_DIR = "$root/wasm/tmp"
+New-Item -ItemType Directory -Path $env:EMCC_TEMP_DIR -Force | Out-Null
 $env:PATH = "$(Split-Path $cmake);$(Split-Path $ninja);$EmsdkDir/upstream/emscripten;$env:PATH"
 & $python $emcmake $cmake -S "$root/wasm/slicing" -B "$root/wasm/build/slicing" -G Ninja "-DCMAKE_MAKE_PROGRAM=$ninja" "-DZSPACE_CORE_DIR=$CoreDir" "-DZSPACE_TETGEN_SOURCE_DIR=$TetgenDir"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
