@@ -16,7 +16,7 @@ Fabrication includes 3D-print slicing and synthesis, C-Tubes and branching tubes
 
 [Core geometry ownership](https://app.gitbook.com/s/FKPJDjBzZtKzxuy72aOX/code/architecture-guide)
 
-[Viewer integration](https://app.gitbook.com/s/lxNYT4JxjtqJ22h7b4hp/code/kernel-guide)
+[Viewer integration](https://app.gitbook.com/s/lxNYT4JxjtqJ22h7b4hp/docs/code/kernel-guide)
 
 [CMakeLists.txt](https://github.com/GitZHACODE/zspace_toolsets/blob/90f88442ee45b1760b7333a6f4aedb1f1e6ee80a/CMakeLists.txt#L1)
 

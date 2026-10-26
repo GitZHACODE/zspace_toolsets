@@ -8,7 +8,7 @@ Typed geometry transfers use the ZST1 version 1 packet contract where supported.
 
 [Toolsets bridge export reference](group-bridge/)
 
-[Viewer toolsets adapter](https://app.gitbook.com/s/lxNYT4JxjtqJ22h7b4hp/code/group-kernels/module-src-kernels-zspacetoolsetswasmadapter)
+[Viewer toolsets adapter](https://app.gitbook.com/s/lxNYT4JxjtqJ22h7b4hp/docs/code/group-kernels/module-src-kernels-zspacetoolsetswasmadapter)
 
 [Core bridge ownership](https://app.gitbook.com/s/FKPJDjBzZtKzxuy72aOX/code/wasm-guide)
 
