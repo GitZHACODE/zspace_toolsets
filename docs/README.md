@@ -1,33 +1,37 @@
-# Project Toolsets
+# zspace_toolsets
 
-zspace\_toolsets contains project-specific tools and algorithms built on zspace\_core. It owns the higher-level construction, optimisation and fabrication workflows, while core provides shared geometry types, function sets and IO.
+Modern zSpace toolsets are built as focused libraries on top of `zspace_core`.
 
-### Responsibilities
+`zTsForcePolyhedra` constructs disjointed force cells from graphs using EGI and
+area pursuit, then couples the form/force diagrams through weighted geometric
+3DGS reciprocation. Supports, nodal self weight and branching graphs are supported.
+See [Force Polyhedra](docs/architecture/force-polyhedra.md).
 
-Maintained C++ toolsets are grouped under include/zspace/zToolsets and src/zToolsets. Existing documentation covers 3DP slicing, C-Tubes, force polyhedra, Vault force-density fitting, panelisation and parametric stairs. Legacy pre-v3 code is reference material.
+`zTsParametricStairs` constructs variable-width graph ribbons with automatic
+end supports and compression-only, fixed-XY Best Fit FDM. The Alice sketch
+updates automatically as its graph and width controls change.
+See [Parametric Stairs](docs/architecture/parametric-stairs.md).
 
-Native builds link the core, interface and IO libraries. The browser bridge builds a separate zspace\_toolsets JavaScript/WASM pair against the sibling core sources; it does not share a heap or pointers with the core module loaded by the viewer.
+The pre-v3 header/source/project layout has been moved to `legacy/pre-v3`. New work should use:
 
-### Relationship to the other repositories
+```text
+include/zspace/zToolsets/
+src/zToolsets/
+examples/
+tests/
+```
 
-[Geometry Kernel](https://app.gitbook.com/o/0Lv7pgeoKI2MXprc3zOv/s/FKPJDjBzZtKzxuy72aOX/) defines the common geometry objects and operations used by each toolset. Keep reusable geometry primitives and general kernel changes there.
+The first migrated toolset is `zTs3DP`, a 3D-printing pipeline for SDF-based slicing, unrolled slice fields, contour extraction, and print-path synthesis.
 
-[Web Viewer](https://app.gitbook.com/o/0Lv7pgeoKI2MXprc3zOv/s/lxNYT4JxjtqJ22h7b4hp/) supplies project inputs, parameter controls and interactive presentation. Its adapters send snapshots and buffers into toolset sessions and copy results back for display.
+`zTsVault` provides Best Fit Force Density modelling with support vertices,
+tension/compression assignments, vertex masses and bounded force densities.
+See [Vault API, build and viewer workflow](docs/architecture/vault-best-fit-fdm.md).
 
-### Follow a project workflow
+Build:
 
-Read [C-Tubes initial port](ctubes-port.md) for the C++ toolset boundary, [Toolsets WASM transfers](typed-wasm-transfers.md) for transport, and [Force C-Tubes viewer workflow](https://app.gitbook.com/s/lxNYT4JxjtqJ22h7b4hp/force-ctubes) for interactive use.
+```bat
+scripts\build_toolsets.bat
+```
 
-The [kernel graph ribbon implementation](https://app.gitbook.com/s/FKPJDjBzZtKzxuy72aOX/graph-mesh) is a shared geometry operation; toolset-specific fitting and project constraints remain in this repository.
-
-[Source repository and review branch](https://github.com/GitZHACODE/zspace_toolsets/tree/docs/gitbook-site-sync)
-
-### Code documentation
-
-Read the architecture and ownership guides, then use the source-derived API reference. The source-version page records the code revision and generation scope.
-
-[Code Documentation](code/)
-
-[Architecture and API ownership](code/architecture-guide.md)
-
-[Source versions and generation](code/generation.md)
+Browser transfer APIs and compatibility are documented in
+[typed WASM transfers](docs/architecture/typed-wasm-transfers.md).
