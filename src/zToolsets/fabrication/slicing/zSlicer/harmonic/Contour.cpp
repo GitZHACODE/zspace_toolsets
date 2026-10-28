@@ -530,10 +530,12 @@ ZSPACE_INLINE bool HarmonicSlicer::computeContours(bool useParallel) {
   o_IsoMeshBoundary.assign(numLayers, zObjGraph());
   o_IsoMeshBoundary2D.assign(numLayers, zObjGraph());
   o_IsoMeshBoundaryWidthId.assign(numLayers, zIntArray());
+  o_IsoMeshBoundaryFaceTags.assign(numLayers, zIntArray());
   std::vector<char> generated(numLayers, 0);
   std::vector<std::vector<std::string>> layerDebug(numLayers);
 
   WallWidthLookup lookup;
+  std::vector<std::pair<int,int>> regionGroups;
   // buildTetVolume preserves input side-face width IDs on the refined surface;
   // caps carry -1. Use tet IDs here, including surface Steiner vertices.
   for (size_t faceId = 0; faceId < _Tet.Faces.size(); ++faceId) {
@@ -542,7 +544,8 @@ ZSPACE_INLINE bool HarmonicSlicer::computeContours(bool useParallel) {
     const auto &tri = face.VertexIds;
     auto key = tri;
     std::sort(key.begin(), key.end());
-    const int widthId = _Tet.FaceWidthIds[faceId];
+    const int widthId = int(regionGroups.size());
+    regionGroups.emplace_back(_Tet.FaceWidthIds[faceId], _Tet.FaceRegionTags[faceId]);
     lookup.Triangles[key] = widthId;
     for (int e = 0; e < 3; ++e)
       lookup.Edges[makeEdgeKey(tri[e], tri[(e + 1) % 3])] = widthId;
@@ -569,6 +572,9 @@ ZSPACE_INLINE bool HarmonicSlicer::computeContours(bool useParallel) {
         zFnMesh(o_IsoMeshes[k]).getPolygonData(connects, counts);
         createIsoBoundaries(positions3D, positions2D, connects, counts, _HarmonicIsoEdgeWidthIds[k],
                              o_IsoMeshBoundary[k], o_IsoMeshBoundary2D[k], o_IsoMeshBoundaryWidthId[k], layerDebug[k]);
+        auto &ids = o_IsoMeshBoundaryWidthId[k];
+        auto &tags = o_IsoMeshBoundaryFaceTags[k]; tags.reserve(ids.size());
+        for (auto &id : ids) { const auto group = regionGroups.at(id); id = group.first; tags.push_back(group.second); }
       }
 
       // Both boundary graphs share connectivity. Count connected components

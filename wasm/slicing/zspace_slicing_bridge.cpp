@@ -72,7 +72,7 @@ Record mesh(zObjMesh& object,int kind,int layer=-1) {
 Record path(const PrintPath& p,int kind,int layer=-1) {
   zPointArray v;zIntArray e;zFnGraph fn(const_cast<zObjGraph&>(p.graph));fn.getVertexPositions(v);fn.getEdgeData(e);
   Record r;r.kind=kind;r.layer=layer;r.arrays[0]=flat(v);r.arrays[1]=NumericArray(e.begin(),e.end());r.arrays[2]=flat(p.normals);
-  r.arrays[3]=NumericArray(p.widths.begin(),p.widths.end());r.arrays[4]=NumericArray(p.heights.begin(),p.heights.end());r.arrays[5]=NumericArray(p.trackIds.begin(),p.trackIds.end());return r;
+  r.arrays[3]=NumericArray(p.widths.begin(),p.widths.end());r.arrays[4]=NumericArray(p.heights.begin(),p.heights.end());r.arrays[5]=NumericArray(p.trackIds.begin(),p.trackIds.end());r.arrays[6]=NumericArray(p.faceTags.begin(),p.faceTags.end());return r;
 }
 void compute(Session& current,int mode,bool useParallel,bool processed) {
   const auto& input=current.input;
@@ -85,7 +85,7 @@ void compute(Session& current,int mode,bool useParallel,bool processed) {
   for(int i:connects)if(size_t(i)>=positions.size())throw std::invalid_argument("Vertex index out of range.");
   auto tags=integers(input[3],counts.size());
   if(tags.size()!=counts.size())throw std::invalid_argument("Provide one tag per face.");
-  for(int t:tags)if(t<Bottom||t>Side)throw std::invalid_argument("Invalid face tag.");
+  for(int t:tags)if(t<Bottom||t>6)throw std::invalid_argument("Invalid face tag.");
   auto widthIds=integers(input[4],counts.size(),-1);
   if(!widthIds.empty()&&widthIds.size()!=counts.size())throw std::invalid_argument("Width groups must match faces.");
   if(mode<0||mode>1)throw std::invalid_argument("Invalid slicing mode.");
@@ -225,7 +225,7 @@ EMSCRIPTEN_KEEPALIVE int zspace_slicing_import_usd(int h,const char* file){
   });
 }
 EMSCRIPTEN_KEEPALIVE int zspace_slicing_export_begin(int h,int layers){
-  return guard([&]{if(layers<0||layers>10000)throw std::invalid_argument("Invalid layer count.");auto& s=session(h);s.exportPath=PrintPath{};s.exportLayers.clear();s.exportLayers.resize(layers);});
+  return guard([&]{if(layers<0||layers>10000)throw std::invalid_argument("Invalid layer count.");auto& s=session(h);s.exportPath=PrintPath{};s.exportLayers.clear();s.exportLayers.resize(layers);s.input[5].clear();s.input[6].clear();});
 }
 EMSCRIPTEN_KEEPALIVE int zspace_slicing_export_add_path(int h,int layer){
   return guard([&]{
@@ -235,6 +235,11 @@ EMSCRIPTEN_KEEPALIVE int zspace_slicing_export_add_path(int h,int layer){
     for(int id:e)if(size_t(id)>=v.size())throw std::invalid_argument("Invalid path edge.");
     if(a[2].size()!=a[0].size()||a[3].size()!=v.size()||a[4].size()!=v.size())throw std::invalid_argument("Path attribute lengths must match vertices.");
     PrintPath p;p.normals=points(a[2]);
+    if(!a[6].empty()) {
+      p.faceTags=integers(a[6],v.size());
+      if(p.faceTags.size()!=v.size() || std::any_of(p.faceTags.begin(),p.faceTags.end(),[](int t){return t>6;}))
+        throw std::invalid_argument("Invalid per-point FaceTags.");
+    }
     for(double x:a[3]){if(!std::isfinite(x)||x<0||x>1e6)throw std::invalid_argument("Invalid path width.");p.widths.push_back(x);}
     for(double x:a[4]){if(!std::isfinite(x)||x<0||x>1e6)throw std::invalid_argument("Invalid path height.");p.heights.push_back(x);}
     zFnGraph(p.graph).create(v,e);

@@ -71,6 +71,8 @@ typedef std::vector<zObjGraph *> zObjGraphPointerArray;
  *  wall, or unconstrained interior (tet-volume marker convention).
  */
 enum VertexTag : int { Interior = 0, Bottom = 1, Top = 2, Side = 3 };
+// Face roles and side-region identity are independent of bead-width groups.
+inline bool isSideFaceTag(int tag) { return tag >= 3 && tag <= 6; }
 // Input convention: one tag per input-mesh FACE (Bottom = print floor, Top =
 // print ceiling, Side = wall), from USD FaceTag attributes
 // supplied by the host application. The slicers derive the per-vertex tags they
@@ -172,6 +174,13 @@ struct PrintPath {
   // zPrintSyn::extractTrackPaths for a double-layer boundary ring; empty
   // for a single-perimeter path (no inner/outer distinction).
   zFloatArray trackIds;
+  // Original side-region ID on outer-wall points/edges; 0 means another role.
+  // A shared corner belongs to both incident edge regions. Its point label is
+  // the smallest incident nonzero tag. Segment membership is authoritative.
+  zIntArray faceTags;
+  zIntArray edgeFaceTags;
+  struct FaceTagSegment { int tag = 0; zIntArray vertices; };
+  std::vector<FaceTagSegment> faceTagSegments;
 };
 
 // Print paths per layer: [layer][path], as produced by the zPrintSyn
@@ -519,6 +528,22 @@ struct FieldSegment {
       : graph(inGraph), type(inType), width(inWidth), offset(inOffset),
         trim(inTrim) {}
 };
+
+// Compact continuous field provenance, in the layer's flattened chart.
+// Geometry fields remain grouped by width; these labels never alter the CSG.
+struct FaceTagSource {
+  zObjGraph boundary, slot;
+  zIntArray edgeTags, edgeWidthIds;
+  std::vector<float> widths;
+  bool doubleBoundary = false;
+  float overlap = 0, slotWidth = 0;
+  std::vector<FieldSegment> bracing;
+};
+
+// Classify using the same boundary/slot distance fields as path generation.
+// Inserts exact category-transition anchors and records directed edge labels.
+ZSPACE_TOOLSETS bool labelFaceTagSegments(PrintPath &path, const FaceTagSource &source, bool splitTransitions = true);
+ZSPACE_TOOLSETS bool queryFaceTags(const FaceTagSource &source, const zPointArray &points, zIntArray &tags);
 
 /*! \brief BoundaryWidth entry of width group id: the last entry for ids
  * past the end; empty tables and widths below 1e-4 mm are invalid. */

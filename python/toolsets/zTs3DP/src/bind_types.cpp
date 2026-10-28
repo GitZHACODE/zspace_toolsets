@@ -84,6 +84,7 @@ void bind_types(py::module_ &m) {
         out["normals"]=arrays::xyz(path.normals);
         out["widths"]=arrays::scalar(path.widths); out["heights"]=arrays::scalar(path.heights);
         out["trackIds"]=arrays::scalar(path.trackIds);
+        out["faceTags"]=arrays::scalar(path.faceTags);
         return out;
       })
       .def_readwrite("graph", &PrintPath::graph)
@@ -92,7 +93,9 @@ void bind_types(py::module_ &m) {
       .def_readwrite("normals", &PrintPath::normals)
       // Per-vertex inner(0)/outer(1) tag, parallel to widths - empty for a
       // single-perimeter path with no inner/outer distinction.
-      .def_readwrite("trackIds", &PrintPath::trackIds);
+      .def_readwrite("trackIds", &PrintPath::trackIds)
+      .def_readwrite("faceTags", &PrintPath::faceTags)
+      .def_readwrite("edgeFaceTags", &PrintPath::edgeFaceTags);
 
 }
 

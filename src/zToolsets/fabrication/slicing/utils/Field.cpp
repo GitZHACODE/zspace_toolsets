@@ -994,6 +994,130 @@ ZSPACE_INLINE void computeWidthField(
   }
 }
 
+namespace {
+template<class Work> bool withFaceTagQuery(const FaceTagSource &source, Work &&work) {
+  zPointArray boundary;
+  zIntArray edges;
+  zFnGraph(const_cast<zObjGraph &>(source.boundary)).getVertexPositions(boundary);
+  zFnGraph(const_cast<zObjGraph &>(source.boundary)).getEdgeData(edges);
+  if (source.edgeTags.size() != edges.size()/2 || source.edgeWidthIds.size() != edges.size()/2)
+    return false;
+  std::vector<FastSegment> boundaryEdges, slotEdges;
+  computeFastSegments(source.boundary, boundaryEdges);
+  computeFastSegments(source.slot, slotEdges);
+  std::vector<FieldSegment> groups;
+  loopWidthSegments(source.boundary, source.edgeWidthIds, source.widths, groups);
+  std::vector<std::vector<FastSegment>> groupEdges, ribs, ribSlots;
+  for (const auto &g : groups) { groupEdges.emplace_back(); computeFastSegments(g.graph, groupEdges.back()); }
+  for (const auto &g : source.bracing) {
+    ribs.emplace_back(); computeFastSegments(g.graph, ribs.back());
+    zObjGraph slot; ribSlots.emplace_back();
+    if (g.trim >= 0 && g.trim <= 1 && createSlot(g.graph, slot, g.trim, g.width*1.5))
+      computeFastSegments(slot, ribSlots.back());
+  }
+  zIntArray groupIds = source.edgeWidthIds;
+  std::sort(groupIds.begin(), groupIds.end());
+  groupIds.erase(std::unique(groupIds.begin(), groupIds.end()), groupIds.end());
+  const auto distance = [&](const zPoint &p, const std::vector<FastSegment> &segments) {
+    zScalarArray d; computeDF(&p, 1, segments, d); return double(d[0]);
+  };
+  const auto label = [&](const zPoint &p) {
+    zScalarArray sign; computeSDF(&p, 1, boundaryEdges, sign);
+    double outer = -1e30, inner = -1e30; int group = -1;
+    for (size_t g = 0; g < groups.size(); ++g) {
+      const double d = distance(p, groupEdges[g]) * (sign[0] <= 0 ? -1 : 1);
+      const double half = .5 * printedWidth(groups[g].width, true, source.doubleBoundary, source.overlap);
+      if (d + half > outer) { outer = d + half; group = int(g); }
+      inner = (std::max)(inner, d + groups[g].width - half);
+    }
+    if (group < 0) return 0;
+    if (source.doubleBoundary) {
+      double bracing = 1e30;
+      for (size_t r = 0; r < ribs.size(); ++r) {
+        const auto &g = source.bracing[r];
+        const double half = .5 * printedWidth(g.width, false, true, source.overlap);
+        double value = distance(p, ribs[r]) - (.5*g.width-half);
+        if (!ribSlots[r].empty()) value = (std::max)(value, -(distance(p, ribSlots[r])-half));
+        bracing = (std::min)(bracing, value);
+      }
+      inner = (std::max)(inner, -bracing);
+      if (-inner > outer + 1e-8) return 0;
+      if (!slotEdges.empty() && source.slotWidth > 0 &&
+          -(distance(p, slotEdges) - .5*printedWidth(source.slotWidth, true, true, source.overlap)) > outer + 1e-8)
+        return 0;
+    }
+    // Resolve the owner inside the winning width field, keeping widths and
+    // side identity independent. Deterministic ties use the smaller tag.
+    double best = 1e30; int tag = 0;
+    for (size_t e = 0; e < boundaryEdges.size(); ++e) {
+      if (source.edgeWidthIds[e] != groupIds[group]) continue;
+      const double d = distance(p, std::vector<FastSegment>{boundaryEdges[e]});
+      const int t = source.edgeTags[e];
+      if (d < best-1e-8 || (std::abs(d-best) <= 1e-8 && (!tag || t < tag))) { best=d; tag=t; }
+    }
+    return isSideFaceTag(tag) ? tag : 0;
+  };
+  return work(label);
+}
+}
+
+ZSPACE_INLINE bool queryFaceTags(const FaceTagSource &source, const zPointArray &points, zIntArray &tags) {
+  tags.clear();
+  return withFaceTagQuery(source,[&](const auto &label) {
+    tags.reserve(points.size());for(const auto &point:points)tags.push_back(label(point));return true;
+  });
+}
+
+ZSPACE_INLINE bool labelFaceTagSegments(PrintPath &path, const FaceTagSource &source, bool splitTransitions) {
+  return withFaceTagQuery(source,[&](const auto &label) {
+  std::vector<GraphPolyline> curves;
+  if (!graphPolylines(path.graph, curves) || curves.size()!=1) return false;
+  auto ids = curves[0].Vertices;
+  if (ids.size()>1 && ids.front()==ids.back()) ids.pop_back();
+  const bool closed=curves[0].Closed;
+  zPointArray points; zFnGraph(path.graph).getVertexPositions(points);
+  if (points.size()!=path.widths.size() || ids.size()<2) return false;
+  PrintPath result; zPointArray output; zIntArray connects;
+  const auto append = [&](int a, int b, double t) {
+    const auto p=points[a]+(points[b]-points[a])*t;
+    if (!output.empty() && vecDistSq(output.back(),p)<1e-18) return;
+    output.push_back(p);
+    result.widths.push_back(float(path.widths[a]+(path.widths[b]-path.widths[a])*t));
+    if (!path.heights.empty()) result.heights.push_back(float(path.heights[a]+(path.heights[b]-path.heights[a])*t));
+    if (!path.normals.empty()) { auto n=path.normals[a]+(path.normals[b]-path.normals[a])*t; if(n.length()>0) n.normalize(); result.normals.push_back(n); }
+    if (!path.trackIds.empty()) result.trackIds.push_back((path.trackIds[a]+(path.trackIds[b]-path.trackIds[a])*t)>=.5 ? 1.f:0.f);
+  };
+  append(ids[0],ids[0],0);
+  for (size_t e=0;e<ids.size()-(closed?0:1);++e) {
+    const int a=ids[e], b=ids[(e+1)%ids.size()];
+    const auto at=[&](double t){ return label(points[a]+(points[b]-points[a])*t); };
+    // Raw contour edges are grid-scale; subdivision also catches two
+    // transitions on one edge near a slot/corner. IDs are never interpolated.
+    double previous=1e-7; int last=at(previous);
+    if(splitTransitions) for(int q=1;q<=8;++q) {
+      const double t=q==8 ? 1-1e-7 : double(q)/8;
+      const int current=at(t);
+      if(current!=last) {
+        double lo=previous,hi=t;
+        for(int it=0;it<30;++it) { const double mid=.5*(lo+hi); if(at(mid)==last) lo=mid; else hi=mid; }
+        append(a,b,.5*(lo+hi));
+      }
+      previous=t; last=current;
+    }
+    if (!closed || e+1<ids.size()) append(a,b,1);
+  }
+  result.faceTags.assign(output.size(),0);
+  for(size_t i=0;i<output.size()-(closed?0:1);++i) {
+    const int a=int(i),b=int((i+1)%output.size());
+    connects.push_back(a);connects.push_back(b);
+    const int tag=label((output[a]+output[b])*.5);
+    result.edgeFaceTags.push_back(tag);
+    for(int v:{a,b}) if(tag && (!result.faceTags[v] || tag<result.faceTags[v])) result.faceTags[v]=tag;
+  }
+  zFnGraph(result.graph).create(output,connects); path=std::move(result); return true;
+  });
+}
+
 ZSPACE_INLINE void computePathField(
     const zObjMeshScalarField &field, const zObjGraph &boundaryPolygon,
     const std::vector<FieldSegment> &segments,

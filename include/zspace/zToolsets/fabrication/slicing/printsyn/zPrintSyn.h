@@ -74,7 +74,15 @@ public:
                                SeamMapping seamMapping, const PrintSynSetting &settings,
                                PrintPathArray &outPaths2D, PrintPathArray &outPaths3D,
                                PrintPath &outCombined, std::string &outStatus, bool useParallel = true,
-                               const std::vector<zFloatArray> *perLayerVertexHeights = nullptr);
+                               const std::vector<zFloatArray> *perLayerVertexHeights = nullptr,
+                               const std::vector<zTsField::FaceTagSource> *faceTagSources = nullptr);
+
+  // Endpoint-inclusive fixed total per FaceTag, measured across all 2D layers.
+  // Disconnected pieces share that budget in proportion to their layer lengths.
+  static bool resampleFaceTaggedPaths(PrintPathArray &paths,
+      const std::vector<zTsField::FaceTagSource> &sources,
+      const PrintSynSetting &settings, std::string &status,
+      const zObjMeshArray *charts2D = nullptr, const zObjMeshArray *sections3D = nullptr);
 
   /*! \brief Step 1: resamples (corner-preserving), glitch-filters and
    * orients every 2D print path in place. Bad layers: a first path that was

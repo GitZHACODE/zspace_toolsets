@@ -225,8 +225,8 @@ inline void readBlock(USDdoc &doc, const std::string &blockPath, double scale,
     throw std::runtime_error("Face attribute count mismatch.");
   for (size_t i = 0; i < counts.size(); ++i) {
     int t = out.FaceTags[i], w = out.FaceWidthIds[i];
-    if (t < 1 || t > 3 ||
-        (t == 3 ? (w < 0 || size_t(w) >= boundary.size()) : w != -1))
+    if (t < 1 || t > 6 ||
+        (isSideFaceTag(t) ? (w < 0 || size_t(w) >= boundary.size()) : w != -1))
       throw std::runtime_error("Invalid face tag or widthid.");
   }
   const bool reverse = (doc.getPrimAtPath(blockPath).getAttribute("orientation").get<std::string>() ==
@@ -303,7 +303,8 @@ inline void writePrintPath(USDdoc &doc, const PrintPath &path, double scale,
   zFnGraph(const_cast<zObjGraph &>(path.graph)).getVertexPositions(positions);
   if (path.normals.size() != positions.size() ||
       path.widths.size() != positions.size() ||
-      path.heights.size() != positions.size())
+      path.heights.size() != positions.size() ||
+      (!path.faceTags.empty() && path.faceTags.size() != positions.size()))
     throw std::runtime_error("Path attribute count mismatch.");
   auto ids = curves[0].Vertices;
   if (ids.size() > 1 && ids.front() == ids.back())
@@ -312,6 +313,7 @@ inline void writePrintPath(USDdoc &doc, const PrintPath &path, double scale,
       ids.size() < (curves[0].Closed ? 3u : 2u))
     throw std::runtime_error("Invalid path vertices.");
   std::vector<float> points, normals, widths, heights;
+  std::vector<int> faceTags;
   points.reserve(ids.size() * 3);
   normals.reserve(ids.size() * 3);
   widths.reserve(ids.size());
@@ -345,6 +347,7 @@ inline void writePrintPath(USDdoc &doc, const PrintPath &path, double scale,
       normals.push_back(f(v));
     widths.push_back(f(format(path.widths[id], scale)));
     heights.push_back(f(format(path.heights[id], scale)));
+    if (!path.faceTags.empty()) faceTags.push_back(path.faceTags[id]);
     if (i + 1 < ids.size() || curves[0].Closed) {
       double d = std::sqrt(zTsUtils::vecDistSq(
                      p, positions[ids[(i + 1) % ids.size()]])) *
@@ -372,6 +375,7 @@ inline void writePrintPath(USDdoc &doc, const PrintPath &path, double scale,
   prim.createAttribute("printNormals", "normal3f[]").set(normals);
   prim.createAttribute("printWidths", "float[]").set(widths);
   prim.createAttribute("printHeight", "float[]").set(heights);
+  if (!faceTags.empty()) prim.createAttribute("printFaceTags", "int[]").set(faceTags);
   auto metadata = doc.readCustomLayerData();
   metadata.erase("printstatisticsvalid");
   metadata["blockid"] = {"int", blockid};

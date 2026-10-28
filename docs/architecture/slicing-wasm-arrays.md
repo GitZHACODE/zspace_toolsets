@@ -62,7 +62,7 @@ zspace_slicing_array_count for the numeric data.
 | Kind | Contents | Array slots |
 | --- | --- | --- |
 | 0 | Shared field mesh | 0 XYZ, 1 face counts, 2 connectivity |
-| 1 | Combined print path | 0 XYZ, 1 edges, 2 normals, 3 widths, 4 heights, 5 track IDs |
+| 1 | Combined print path | 0 XYZ, 1 edges, 2 normals, 3 widths, 4 heights, 5 track IDs, 6 original side FaceTags |
 | 2 | Layer slice mesh | Same as kind 0 |
 | 3 | Layer chart mesh | Same as kind 0 |
 | 4 | Layer print path | Same as kind 1 |
@@ -93,7 +93,7 @@ Unknown-setting warnings use zspace_slicing_warning_count / warning.
 For export:
 1. zspace_slicing_export_begin(handle, layerCount).
 2. Upload each path using input slots 0 XYZ, 1 edges, 2 normals, 3 widths,
-   4 heights.
+   4 heights, optionally 6 FaceTags (one integer 0..6 per point).
 3. zspace_slicing_export_add_path(handle, layer), using -1 for the combined
    path and zero-based layer indices for individual paths.
 4. zspace_slicing_export_usd(handle, source, output, blockid).

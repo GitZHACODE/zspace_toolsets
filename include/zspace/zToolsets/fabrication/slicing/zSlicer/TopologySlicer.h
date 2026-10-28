@@ -83,7 +83,7 @@ protected:
   zObjGraphArray _VLoops;
   std::vector<zScalarArray> _VScalar;
   zFloatArray _VLength;
-  std::vector<zIntArray> _VLoopSegmentWidthIds;
+  std::vector<zIntArray> _VLoopSegmentWidthIds, _VLoopSegmentFaceTags;
   ParameterGraph _BracingParams;
   std::string _Status;
 
@@ -99,6 +99,7 @@ protected:
   std::vector<zScalarArray> o_PathFields;
   std::vector<zScalarArray> o_WidthFields;
   std::vector<zScalarArray> o_TrackFields;
+  std::vector<zTsField::FaceTagSource> o_FaceTagSources;
 
   //---- OUTPUTS : computePostProcess() (cleared by computeSlicer())
   PrintPathArray o_PrintPaths2D;
@@ -140,6 +141,7 @@ public:
     i_FaceWidthIds = inFaceWidthIds;
     _VertexTags.clear();
   }
+  const std::vector<zTsField::FaceTagSource> &getFaceTagSources() const { return o_FaceTagSources; }
   const zIntArray &getFaceTags() const { return i_FaceTags; }
   const zIntArray &getFaceWidthIds() const { return i_FaceWidthIds; }
   // Derived by computeBasicStructure(); empty before it.
@@ -220,6 +222,7 @@ public:
    * wall face between the two V-loops the edge spans, at that layer's
    * height. Requires computeSlice(). */
   void _layerEdgeWidthIds(int layer, int totalLayers, zIntArray &outEdgeIds) const;
+  void _layerEdgeFaceTags(int layer, int totalLayers, zIntArray &outEdgeIds) const;
 
   //--------------------------
   //---- MAIN COMPUTE METHODS

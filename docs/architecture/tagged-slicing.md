@@ -13,8 +13,9 @@ implementation `.cpp` files; link against `zspace::toolsets`.
 
 - A polygon mesh, copied into the session. Topology mode requires all-quad faces,
   one connected floor patch and regular columns connecting the floor to the top.
-- One `VertexTag` per **face**, in polygon order: `Bottom`, `Top`, or `Side`.
-  Operators derive their vertex tags from these face tags.
+- One tag per **face**, in polygon order: 1 Bottom, 2 Top, or 3–6 side
+  regions. Operators derive Bottom/Top/Side vertex roles while preserving
+  each original side-region ID independently of its width ID.
 - Optional per-face width-group IDs, indexing `SlicerSettings::BoundaryWidth`.
 - An optional bracing graph in the input mesh's coordinate system.
 - An explicit slot anchor in that coordinate system, required by both operators.
@@ -58,6 +59,38 @@ where the desktop implementation did so; check the return value and status
 before consuming the combined path.
 
 Per-path data includes the graph, widths, heights, normals and track IDs.
+Inputs containing side tags 4–6 also enable FaceTag sampling. PrintSyn prepares
+corners and orientation, aligns/cuts the seam, then samples the tagged outer
+segments before projection/linking. Legacy inputs with only side tag 3 retain
+their existing sampling order and behavior.
+
+For each FaceTag, the target interval count comes from its mean **flattened 2D**
+printable outer length across all layers divided by `ResampleLength`, rounded to
+the nearest integer. Open-piece endpoint counts and required corner anchors set
+the point-budget minimum. Every layer uses the same total point budget for that
+tag. A staggered slot's disconnected pieces share that budget in proportion to
+their lengths on that layer; their individual counts can change. Spacing is
+uniform between protected anchors, subject to integer allocation. No outer
+segment bridges the slot; its returns are excluded from the outer budget.
+
+The shape/width fields remain unchanged. A compact continuous field provenance
+query uses the same width-group boundary distances and active CSG branches to
+identify regions, including bracing and slot returns. Category transitions
+become protected contour anchors; integer IDs are never linearly interpolated.
+`PrintPath::faceTags` carries a side ID on each outer sample, or 0 for another
+role. `edgeFaceTags` labels graph edges. `faceTagSegments` records ordered,
+endpoint-inclusive region membership. Shared corners are stored once and can
+belong to both incident segments; their single point label is the smaller
+nonzero incident tag. Therefore segment budgets include shared endpoints while
+per-point label counts assign each corner once. Both counts stay consistent
+across layers with the same region topology. Missing tags fail explicitly.
+Raw contour labeling preserves geometry. Category anchors are inserted after
+corner/seam preparation; consecutive anchors that project to the same physical
+point merge before budgeting. This prevents zero-length 3D edges while retaining
+the shared point count and coincident feature identities.
+Projection preserves these indices and labels; linking assigns travel edges tag
+0. USD `/TDP_gcode.printFaceTags`, WASM result slot 6 and Python `faceTags`
+expose the per-point labels. `trackIds` continues to mean inner 0 / outer 1.
 Topology intermediate outputs are available through `getTopologySlicer()`;
 harmonic outputs through `getHarmonicSlicer()`. Changing mode replaces the
 operator and invalidates references to its results.

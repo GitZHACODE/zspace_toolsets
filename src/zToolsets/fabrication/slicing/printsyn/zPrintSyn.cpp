@@ -1426,6 +1426,9 @@ ZSPACE_INLINE bool zPrintSyn::projectPrintPaths(const PrintPathArray &paths2D,
         outPaths3D[l][r].graph = paths2D[l][r].graph;
         outPaths3D[l][r].widths = paths2D[l][r].widths;
         outPaths3D[l][r].trackIds = paths2D[l][r].trackIds;
+        outPaths3D[l][r].faceTags = paths2D[l][r].faceTags;
+        outPaths3D[l][r].edgeFaceTags = paths2D[l][r].edgeFaceTags;
+        outPaths3D[l][r].faceTagSegments = paths2D[l][r].faceTagSegments;
 
         zFnGraph fnContour(outPaths3D[l][r].graph);
         if (fnContour.numVertices() > 0 && l < int(charts2D.size()) &&
@@ -1501,6 +1504,7 @@ ZSPACE_INLINE bool zPrintSyn::linkPrintPaths(const PrintPathArray &paths3D,
   zVectorArray combinedNormals;
   zFloatArray combinedTrackIds;
   zIntArray combinedEdges;
+  std::unordered_map<unsigned long long, int> combinedEdgeLabels;
 
   for (const auto &ringPaths : paths3D) {
     for (const PrintPath &layerPath : ringPaths) {
@@ -1511,6 +1515,17 @@ ZSPACE_INLINE bool zPrintSyn::linkPrintPaths(const PrintPathArray &paths3D,
       if (positions.empty())
         continue;
       const int base = static_cast<int>(combinedPositions.size());
+      zIntArray sourceEdges;
+      fnGraph.getEdgeData(sourceEdges);
+      for (size_t e=0; e<sourceEdges.size()/2; ++e)
+        if (e < layerPath.edgeFaceTags.size())
+          combinedEdgeLabels[makeEdgeKey(base+sourceEdges[2*e], base+sourceEdges[2*e+1])] = layerPath.edgeFaceTags[e];
+      outCombined.faceTags.insert(outCombined.faceTags.end(), layerPath.faceTags.empty() ? positions.size() : 0, 0);
+      outCombined.faceTags.insert(outCombined.faceTags.end(), layerPath.faceTags.begin(), layerPath.faceTags.end());
+      for (auto segment : layerPath.faceTagSegments) {
+        for (int &id : segment.vertices) id += base;
+        outCombined.faceTagSegments.push_back(std::move(segment));
+      }
       if (hasMultiplePaths) {
         zIntArray edges;
         fnGraph.getEdgeData(edges);
@@ -1566,6 +1581,11 @@ ZSPACE_INLINE bool zPrintSyn::linkPrintPaths(const PrintPathArray &paths3D,
 
   zFnGraph fnOut(outCombined.graph);
   fnOut.create(combinedPositions, combinedEdges);
+  if (!outCombined.faceTagSegments.empty())
+    for (size_t e=0; e<combinedEdges.size(); e+=2) {
+      const auto it=combinedEdgeLabels.find(makeEdgeKey(combinedEdges[e],combinedEdges[e+1]));
+      outCombined.edgeFaceTags.push_back(it==combinedEdgeLabels.end() ? 0 : it->second);
+    }
   outCombined.widths = combinedWidths;
   if (hasHeights)
     outCombined.heights = combinedHeights;
@@ -1585,7 +1605,8 @@ ZSPACE_INLINE bool zPrintSyn::computePipeline(const zObjMeshArray &charts2D,
     SeamMapping seamMapping, const PrintSynSetting &settings,
     PrintPathArray &outPaths2D, PrintPathArray &outPaths3D,
     PrintPath &outCombined, std::string &outStatus, bool useParallel,
-    const std::vector<zFloatArray> *perLayerVertexHeights) {
+    const std::vector<zFloatArray> *perLayerVertexHeights,
+    const std::vector<zTsField::FaceTagSource> *faceTagSources) {
   outPaths3D.clear();
   outCombined = PrintPath();
   const size_t n = outPaths2D.size();
@@ -1610,12 +1631,24 @@ ZSPACE_INLINE bool zPrintSyn::computePipeline(const zObjMeshArray &charts2D,
     outStatus = "stopped at " + step + ": " + reason + " - the paths are kept as this step left them.";
     return true;
   };
-  if (stopAt(resamplePrintPaths(outPaths2D, settings, outStatus, &badLayers, useParallel),
+  const bool tagged = faceTagSources && faceTagSources->size() == n &&
+      std::any_of(faceTagSources->begin(), faceTagSources->end(), [](const auto &s){ return !s.edgeTags.empty(); });
+  if (tagged) {
+    for (auto &layer : outPaths2D) {
+      for (auto &path : layer) if (!reconstructCorners(path, settings.FeatureAngleTol)) {
+        outStatus = "failed: cannot prepare FaceTag corners"; return false;
+      }
+      orientLayer(layer, true);
+    }
+  }
+  if (!tagged && stopAt(resamplePrintPaths(outPaths2D, settings, outStatus, &badLayers, useParallel),
               "resamplePrintPaths")) return false;
   const bool aligned = seamMapping == SeamMapping::SharedTopology
       ? alignStartPoints(outPaths2D, charts2D, settings.SeamOffset, settings.SeamSize, outStatus, &badLayers, useParallel)
       : alignStartPoints(outPaths2D, charts2D, sections3D, settings.SeamOffset, settings.SeamSize, outStatus, &badLayers, useParallel);
   if (stopAt(aligned, "alignStartPoints")) return false;
+  if (tagged && stopAt(resampleFaceTaggedPaths(outPaths2D, *faceTagSources, settings, outStatus, &charts2D, &sections3D),
+                       "resampleFaceTaggedPaths")) return false;
   if (stopAt(projectPrintPaths(outPaths2D, charts2D, sections3D, vertexLayerHeights,
                               outPaths3D, outStatus, &badLayers, useParallel, perLayerVertexHeights), "projectPrintPaths")) return false;
   badLayers.clear();

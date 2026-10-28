@@ -268,7 +268,7 @@ ZSPACE_INLINE bool vertexTagsFromFaceTags(zObjMesh &mesh,
   size_t offset = 0;
   for (size_t f = 0; f < counts.size(); f++) {
     const int tag = faceTags[f];
-    if (tag != kBottom && tag != kTop && tag != kSide)
+    if (tag != kBottom && tag != kTop && !isSideFaceTag(tag))
       return fail("face " + std::to_string(f) + " has tag " +
                   std::to_string(tag) + " (expected Bottom/Top/Side)");
     if (tag == kBottom)
@@ -316,7 +316,7 @@ ZSPACE_INLINE int widthGroupCount(const zIntArray &faceTags,
                                    const zIntArray &faceWidthIds) {
   int count = 0;
   for (size_t f = 0; f < faceTags.size(); f++) {
-    if (faceTags[f] != static_cast<int>(VertexTag::Side))
+    if (!isSideFaceTag(faceTags[f]))
       continue;
     const int id = (f < faceWidthIds.size()) ? faceWidthIds[f] : 0;
     count = (std::max)(count, id + 1);

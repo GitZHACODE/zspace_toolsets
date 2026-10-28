@@ -46,11 +46,15 @@ ZSPACE_INLINE bool HarmonicSlicer::buildTetVolume() {
   input.numberoffacets = static_cast<int>(_Tet.Surface.Triangles.size());
   input.facetlist = new tetgenio::facet[input.numberoffacets];
   input.facetmarkerlist = new int[input.numberoffacets];
+  std::vector<std::pair<int,int>> sideGroups;
   const auto faceGroup = [&](int t) {
     const auto tag = _Tet.SurfaceTags[t];
     if (tag == HarmonicField::TetFaceTag::Bottom) return 0;
     if (tag == HarmonicField::TetFaceTag::Top) return 1;
-    return 2 + _Tet.SurfaceWidthIds[t];
+    const auto key = std::make_pair(_Tet.SurfaceWidthIds[t], _Tet.SurfaceRegionTags[t]);
+    auto it = std::find(sideGroups.begin(), sideGroups.end(), key);
+    if (it == sideGroups.end()) { sideGroups.push_back(key); return 1 + int(sideGroups.size()); }
+    return 2 + int(it - sideGroups.begin());
   };
   for (size_t t = 0; t < _Tet.SurfaceTags.size(); ++t) {
     if (_Tet.SurfaceTags[t] == HarmonicField::TetFaceTag::Interior ||
@@ -179,7 +183,7 @@ ZSPACE_INLINE bool HarmonicSlicer::buildTetVolume() {
   // touches a Top face, Side otherwise (so a point on a floor-cap border or
   // inside the cap stays a Dirichlet Bottom vertex, one on the wall is free).
   // Input points keep their tags; interior points are free.
-  zIntArray boundaryFaceWidthIds(boundaryFaces.size(), -1);
+  zIntArray boundaryFaceWidthIds(boundaryFaces.size(), -1), boundaryRegionTags(boundaryFaces.size(), 0);
   std::vector<HarmonicField::TetFaceTag> boundaryTags(boundaryFaces.size(), HarmonicField::TetFaceTag::Interior);
   std::vector<char> touchesBottom(outputCount, 0), touchesTop(outputCount, 0);
   int unmarkedFaces = 0;
@@ -193,7 +197,7 @@ ZSPACE_INLINE bool HarmonicSlicer::buildTetVolume() {
     }
     const int group = found->second;
     boundaryTags[f] = group == 0 ? HarmonicField::TetFaceTag::Bottom : group == 1 ? HarmonicField::TetFaceTag::Top : HarmonicField::TetFaceTag::Side;
-    if (group >= 2) boundaryFaceWidthIds[f] = group - 2;
+    if (group >= 2) { boundaryFaceWidthIds[f] = sideGroups.at(group-2).first; boundaryRegionTags[f] = sideGroups.at(group-2).second; }
     for (int v : boundaryFaces[f]) {
       if (group == 0) touchesBottom[v] = 1;
       else if (group == 1) touchesTop[v] = 1;
@@ -235,6 +239,7 @@ ZSPACE_INLINE bool HarmonicSlicer::buildTetVolume() {
     surface.Triangles.push_back({newId[face[0]], newId[face[1]], newId[face[2]]});
   _Tet.Surface = std::move(surface);
   _Tet.SurfaceWidthIds = boundaryFaceWidthIds;
+  _Tet.SurfaceRegionTags = boundaryRegionTags;
   _Tet.SurfaceTags = std::move(boundaryTags);
 
   return !_Tet.Volumes.empty() && buildTetTopology();
@@ -311,6 +316,7 @@ ZSPACE_INLINE bool HarmonicSlicer::buildTetTopology() {
   }
   _Tet.FaceTags.assign(_Tet.Faces.size(), HarmonicField::TetFaceTag::Interior);
   _Tet.FaceWidthIds.assign(_Tet.Faces.size(), -1);
+  _Tet.FaceRegionTags.assign(_Tet.Faces.size(), 0);
   _Tet.SurfaceFaceIds.resize(_Tet.Surface.Triangles.size());
   for (size_t s = 0; s < _Tet.Surface.Triangles.size(); ++s) {
     auto key = _Tet.Surface.Triangles[s];
@@ -324,9 +330,11 @@ ZSPACE_INLINE bool HarmonicSlicer::buildTetTopology() {
     const int faceId = found->second;
     _Tet.FaceTags[faceId] = _Tet.SurfaceTags[s];
     _Tet.FaceWidthIds[faceId] = _Tet.FaceTags[faceId] == HarmonicField::TetFaceTag::Side ? _Tet.SurfaceWidthIds[s] : -1;
+    _Tet.FaceRegionTags[faceId] = _Tet.SurfaceRegionTags[s];
     _Tet.SurfaceFaceIds[s] = found->second;
   }
   _Tet.SurfaceWidthIds.clear();
+  _Tet.SurfaceRegionTags.clear();
   _Tet.SurfaceTags.clear();
   return true;
 }
@@ -418,10 +426,11 @@ ZSPACE_INLINE void HarmonicSlicer::buildSurfaceSoup() {
   zIntArray counts;
   fn.getPolygonData(connects, counts);
   _Tet.SurfaceWidthIds.clear();
+  _Tet.SurfaceRegionTags.clear();
   _Tet.SurfaceTags.clear();
   int cursor = 0;
   for (int face = 0; face < static_cast<int>(counts.size()); ++face) {
-    const bool side = face < static_cast<int>(i_FaceTags.size()) && i_FaceTags[face] == static_cast<int>(VertexTag::Side);
+    const bool side = face < static_cast<int>(i_FaceTags.size()) && isSideFaceTag(i_FaceTags[face]);
     const int widthId = !side ? -1 : (face < static_cast<int>(i_FaceWidthIds.size()) ? i_FaceWidthIds[face] : 0);
     const int count = counts[face];
     for (int i = 1; i + 1 < count; ++i) {
@@ -429,6 +438,7 @@ ZSPACE_INLINE void HarmonicSlicer::buildSurfaceSoup() {
       if (tri[0] != tri[1] && tri[1] != tri[2] && tri[2] != tri[0]) {
         _Tet.Surface.Triangles.push_back(tri);
         _Tet.SurfaceWidthIds.push_back(widthId);
+        _Tet.SurfaceRegionTags.push_back(side ? i_FaceTags[face] : 0);
         _Tet.SurfaceTags.push_back(side ? HarmonicField::TetFaceTag::Side :
             i_FaceTags[face] == static_cast<int>(VertexTag::Bottom) ? HarmonicField::TetFaceTag::Bottom :
             i_FaceTags[face] == static_cast<int>(VertexTag::Top) ? HarmonicField::TetFaceTag::Top : HarmonicField::TetFaceTag::Interior);
@@ -446,6 +456,7 @@ ZSPACE_INLINE void HarmonicSlicer::clearPrintPaths() {
 }
 
 ZSPACE_INLINE void HarmonicSlicer::clearFields() {
+  o_FaceTagSources.clear();
   clearPrintPaths();
   o_PathFields.clear();
   o_WidthFields.clear();

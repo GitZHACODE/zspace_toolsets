@@ -101,6 +101,7 @@ ZSPACE_INLINE bool TopologySlicer::computeFieldImpl(bool useParallel) {
   outPathFields.clear();
   outWidthFields.clear();
   outTrackFields.clear();
+  o_FaceTagSources.clear();
 
   if (!i_SlotPoint) {
     _Status = "failed: i_SlotPoint is required. Call setSlotAnchor() before computing.";
@@ -119,6 +120,7 @@ ZSPACE_INLINE bool TopologySlicer::computeFieldImpl(bool useParallel) {
   outPathFields.assign(totalLayers, zScalarArray());
   outWidthFields.assign(totalLayers, zScalarArray());
   outTrackFields.assign(totalLayers, zScalarArray());
+  o_FaceTagSources.resize(totalLayers);
 
   const float printOverlapWidth = i_Settings.OverlapWidth;
   const float targetCellSize =
@@ -224,6 +226,16 @@ ZSPACE_INLINE bool TopologySlicer::computeFieldImpl(bool useParallel) {
               i_Settings.BracingSlot, segmentGraphs, l)) continue;
       }
 
+      if (std::any_of(i_FaceTags.begin(), i_FaceTags.end(), [](int t){ return t > 3; })) {
+        auto &source = o_FaceTagSources[l];
+        source.boundary = o_IsoMeshBoundary2D[l]; source.slot = boundarySlot;
+        _layerEdgeFaceTags(l, totalLayers, source.edgeTags);
+        source.edgeWidthIds = layerEdgeIds; source.widths = edgeWidths;
+        source.doubleBoundary = i_Settings.DoubleBoundary;
+        source.overlap = printOverlapWidth; source.slotWidth = slotWidth;
+        for (const auto &segment : segmentGraphs) if (segment.type != 0) source.bracing.push_back(segment);
+      }
+
       std::vector<zScalarArray> segDistances;
       zScalarArray boundarySigns;
       zTsField::computeSegmentDistances(outScalarField, segmentGraphs,
@@ -309,6 +321,49 @@ ZSPACE_INLINE void TopologySlicer::_layerEdgeWidthIds(int layer, int totalLayers
   }
 }
 
+ZSPACE_INLINE void TopologySlicer::_layerEdgeFaceTags(int layer, int totalLayers,
+                                                     zIntArray &outEdgeIds) const {
+  outEdgeIds.clear();
+  if (layer < 0 || layer >= int(o_IsoMeshBoundary.size()))
+    return;
+  zPointArray loop;
+  zFnGraph(const_cast<zObjGraph &>(o_IsoMeshBoundary[layer])).getVertexPositions(loop);
+  const int n = int(loop.size());
+  if (n < 3 || n != int(_VLoops.size()) || n != int(_VLoopSegmentFaceTags.size()))
+    return;
+  const double ratio = (totalLayers > 1) ? double(layer) / (totalLayers - 1) : 0.0;
+
+  // Group of each V-loop's segment at this height.
+  zIntArray columnGroup(n, 0);
+  for (int c = 0; c < n; c++) {
+    const zScalarArray &arc = _VScalar[c];
+    const zIntArray &groups = _VLoopSegmentFaceTags[c];
+    if (arc.size() < 2 || groups.empty())
+      continue;
+    const double s = ratio * arc.back();
+    int k = int(std::upper_bound(arc.begin(), arc.end(), s) - arc.begin()) - 1;
+    k = (std::max)(0, (std::min)(k, int(groups.size()) - 1));
+    columnGroup[c] = groups[k];
+  }
+
+  // Loop vertex -> V-loop: identity, or (n - j) % n if the loop was reversed.
+  bool reversed = false;
+  {
+    zPoint onNext, onPrev;
+    samplePolyline(_VLoops[1], _VScalar[1], ratio, onNext);
+    samplePolyline(_VLoops[n - 1], _VScalar[n - 1], ratio, onPrev);
+    reversed = vecDistSq(loop[1], onPrev) < vecDistSq(loop[1], onNext);
+  }
+  const auto columnOf = [&](int j) { return reversed ? (n - j) % n : j; };
+
+  outEdgeIds.assign(n, 0);
+  for (int j = 0; j < n; j++) {
+    const int a = columnOf(j), b = columnOf((j + 1) % n);
+    // The face strip between V-loops a and a + 1 is recorded on V-loop a.
+    outEdgeIds[j] = columnGroup[(b == (a + 1) % n) ? a : b];
+  }
+}
+
 ZSPACE_INLINE bool TopologySlicer::computePrintPath(bool useParallel) {
   const bool success = computePrintPathImpl(useParallel);
   if (success) updatePrintStatistics(false);
@@ -345,6 +400,9 @@ ZSPACE_INLINE bool TopologySlicer::computePrintPathImpl(bool useParallel) {
         failed[k] = 1;
         continue;
       }
+      if (k < int(o_FaceTagSources.size()) && !o_FaceTagSources[k].edgeTags.empty())
+        for (auto &path : o_PrintPaths2D[k])
+          if (!zTsField::labelFaceTagSegments(path, o_FaceTagSources[k], false)) throw std::runtime_error("Invalid FaceTag provenance");
       if (!zTsField::mapPrintPaths(o_PrintPaths2D[k], o_IsoMeshes2D[k], o_IsoMeshes[k],
                                   &_VLength, o_PrintPaths3D[k], k)) failed[k] = 1;
     } catch (...) { parallelErrors2.capture(k); }

@@ -60,7 +60,7 @@ ZSPACE_INLINE bool HarmonicSlicer::computePostProcessImpl(const PrintSynSetting 
 
   const bool ok = zPrintSyn::computePipeline(o_IsoMeshes2D, o_IsoMeshes, nullptr,
       zPrintSyn::SeamMapping::WorldNearest, settings, o_PrintPaths2D, o_PrintPaths3D,
-      o_ResultantPrintPath, _Status, useParallel, &o_VertexLayerHeights);
+      o_ResultantPrintPath, _Status, useParallel, &o_VertexLayerHeights, &o_FaceTagSources);
   if (!ok) zTsUtils::printDebug("[computePostProcessImpl] Post-processing stopped because a helper failed or reported invalid paths; partial results are retained.");
   return ok;
 }
