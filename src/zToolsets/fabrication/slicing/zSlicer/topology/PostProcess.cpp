@@ -73,7 +73,7 @@ ZSPACE_INLINE bool TopologySlicer::computePostProcessImpl(const PrintSynSetting 
 
   const bool ok = zPrintSyn::computePipeline(o_IsoMeshes2D, o_IsoMeshes, &_VLength,
       zPrintSyn::SeamMapping::SharedTopology, settings, o_PrintPaths2D, o_PrintPaths3D,
-      o_ResultantPrintPath, _Status, useParallel);
+      o_ResultantPrintPath, _Status, useParallel, nullptr, nullptr, &o_FaceTagSources);
   if (!ok) zTsUtils::printDebug("[computePostProcessImpl] Post-processing stopped because a helper failed or reported invalid paths; partial results are retained.");
   return ok;
 }

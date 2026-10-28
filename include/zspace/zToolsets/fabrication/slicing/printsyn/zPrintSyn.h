@@ -88,7 +88,8 @@ public:
                                PrintPathArray &outPaths2D, PrintPathArray &outPaths3D,
                                PrintPath &outCombined, std::string &outStatus, bool useParallel = true,
                                const std::vector<zFloatArray> *perLayerVertexHeights = nullptr,
-                               const std::vector<zVectorArray> *perLayerVertexNormals = nullptr);
+                               const std::vector<zVectorArray> *perLayerVertexNormals = nullptr,
+                               const std::vector<zTsField::FaceTagSource> *faceTagSources = nullptr);
 
   // Same production result; optional owned COPY of the successfully mapped,
   // seam-trimmed processed 2D contours before final target sampling. This is
@@ -103,7 +104,12 @@ public:
                                PrintPath &outCombined, std::string &outStatus, bool useParallel,
                                const std::vector<zFloatArray> *perLayerVertexHeights,
                                const std::vector<zVectorArray> *perLayerVertexNormals,
-                               PrintPathArray *outSurfaceContours2D);
+                               PrintPathArray *outSurfaceContours2D,
+                               const std::vector<zTsField::FaceTagSource> *faceTagSources = nullptr);
+
+  static bool resampleFaceTaggedPaths(PrintPathArray &paths, const std::vector<zTsField::FaceTagSource> &sources,
+      const PrintSynSetting &settings, std::string &status,
+      const zObjMeshArray *charts2D = nullptr, const zObjMeshArray *sections3D = nullptr);
 
   /*! \brief Step 1: resamples (corner-preserving), glitch-filters and
    * orients every 2D print path in place. Carries featureFlags and preserves

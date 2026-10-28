@@ -19,10 +19,10 @@ bool buildPrintMesh(const PrintPathArray &layers, zObjMesh &outMesh,
     const auto finite = [](const zVector &v) {
       return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
     };
-    const auto unit = [](const zVector &v) {
+    const auto unit = [](const zVector &v, const char *context) {
       const double length = std::hypot(double(v.x), double(v.y), double(v.z));
       if (!std::isfinite(length) || length <= 1e-12)
-        throw std::runtime_error("Zero or invalid section direction.");
+        throw std::runtime_error(std::string("Zero or invalid section direction: ")+context);
       return zVector(v.x / length, v.y / length, v.z / length);
     };
     const auto quad = [&](int a, int b, int c, int d) {
@@ -66,10 +66,10 @@ bool buildPrintMesh(const PrintPathArray &layers, zObjMesh &outMesh,
           std::vector<zVector> directions;
           for (size_t i = 0; i < segments; ++i)
             directions.push_back(
-                unit(vecSub(points[ids[(i + 1) % n]], points[ids[i]])));
+                unit(vecSub(points[ids[(i + 1) % n]], points[ids[i]]),"edge"));
           for (size_t i = 0; i < n; ++i) {
             const int id = ids[i];
-            const zVector normal = unit(path.normals[id]);
+            const zVector normal = unit(path.normals[id],"normal");
             const zVector incoming =
                 directions[i == 0 ? (curve.Closed ? segments - 1 : 0) : i - 1];
             const zVector outgoing =
@@ -83,7 +83,7 @@ bool buildPrintMesh(const PrintPathArray &layers, zObjMesh &outMesh,
               width = vecCross(normal, outgoing);
             if (vecDot(width, width) <= 1e-24)
               width = vecCross(normal, incoming);
-            width = unit(width);
+            width = unit(width,"cross-section width");
             const double w = path.widths[id] * 0.5, h = path.heights[id] * 0.5;
             for (const auto &sign :
                  {std::array<int, 2>{-1, -1}, {1, -1}, {1, 1}, {-1, 1}}) {

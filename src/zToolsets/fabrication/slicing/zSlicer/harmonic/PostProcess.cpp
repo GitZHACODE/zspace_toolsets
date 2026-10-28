@@ -124,7 +124,7 @@ bool HarmonicSlicer::rebuildSurfaceCharts(bool parallel){
   for(int k=0;k<count;++k){try{zPointArray world,flat;
     if(!unrollIsoMesh(o_IsoMeshes[k],o_IsoMeshUV[k],o_IsoMeshes2D[k],world,flat))continue;
     zIntArray connects,counts;zFnMesh(o_IsoMeshes[k]).getPolygonData(connects,counts);std::vector<std::string> debug;
-    createIsoBoundaries(world,flat,connects,counts,_HarmonicIsoEdgeWidthIds[k],o_IsoMeshBoundary[k],o_IsoMeshBoundary2D[k],o_IsoMeshBoundaryWidthId[k],debug);valid[k]=1;
+    createIsoBoundaries(world,flat,connects,counts,_HarmonicIsoEdgeWidthIds[k],o_IsoMeshBoundary[k],o_IsoMeshBoundary2D[k],o_IsoMeshBoundaryWidthId[k],debug);decodeBoundaryGroups(k);valid[k]=1;
   }catch(...){failures.capture(k);}}
   failures.rethrow();if(std::find(valid.begin(),valid.end(),char(0))!=valid.end()){
     _Status="Surface feedback could not unfold every section.";return false;}
@@ -137,7 +137,7 @@ ZSPACE_INLINE bool HarmonicSlicer::computePostProcessImpl(const PrintSynSetting 
     if(!computePrintPath(useParallel))return false;PrintPathArray rawContours;if(enabled)rawContours=o_PrintPaths2D;
     if(!zPrintSyn::computePipeline(o_IsoMeshes2D,o_IsoMeshes,nullptr,
       zPrintSyn::SeamMapping::WorldNearest,settings,o_PrintPaths2D,o_PrintPaths3D,
-      o_ResultantPrintPath,_Status,useParallel,&o_VertexLayerHeights,&o_VertexLayerNormals,enabled?&surfaceContours:nullptr))return false;
+      o_ResultantPrintPath,_Status,useParallel,&o_VertexLayerHeights,&o_VertexLayerNormals,enabled?&surfaceContours:nullptr,&o_FaceTagSources))return false;
     if(enabled){
       // Validate the entire original SDF curve, including the future seam
       // interval. Sampling/feature reconstruction cannot hide an excursion.
@@ -151,14 +151,14 @@ ZSPACE_INLINE bool HarmonicSlicer::computePostProcessImpl(const PrintSynSetting 
   struct SurfaceState {
     zObjMeshArray Iso,Charts;zObjGraphArray Boundary,Boundary2D;
     std::vector<zPointArray> UV;std::vector<zFloatArray> Heights;std::vector<zVectorArray> Normals;
-    std::vector<EdgeWidthIds> EdgeWidths;std::vector<zIntArray> Widths;std::vector<double> Levels;
+    std::vector<EdgeWidthIds> EdgeWidths;std::vector<zIntArray> Widths,RegionTags;std::vector<double> Levels;
     PrintPathArray Paths2D,Paths3D;zTsRelax::HeightReport Report;zTsRelax::Report Relaxation;
     bool Valid=false;
   } best;
   const auto retain=[&](){if(best.Valid&&best.Report.WorstViolation<=total.WorstViolation)return;
     best.Iso=o_IsoMeshes;best.Charts=o_IsoMeshes2D;best.Boundary=o_IsoMeshBoundary;best.Boundary2D=o_IsoMeshBoundary2D;
     best.UV=o_IsoMeshUV;best.Heights=o_VertexLayerHeights;best.Normals=o_VertexLayerNormals;best.EdgeWidths=_HarmonicIsoEdgeWidthIds;
-    best.Widths=o_IsoMeshBoundaryWidthId;best.Levels=_IsoValues;best.Paths2D=o_PrintPaths2D;best.Paths3D=o_PrintPaths3D;
+    best.Widths=o_IsoMeshBoundaryWidthId;best.RegionTags=o_IsoMeshBoundaryFaceTags;best.Levels=_IsoValues;best.Paths2D=o_PrintPaths2D;best.Paths3D=o_PrintPaths3D;
     best.Report=total;best.Relaxation=_IsoRelaxationReport;best.Valid=true;};
   std::string lastCandidateError;
   for(size_t candidate=0;candidate<candidates.size();++candidate){
@@ -206,7 +206,7 @@ ZSPACE_INLINE bool HarmonicSlicer::computePostProcessImpl(const PrintSynSetting 
   }
   if(best.Valid){o_IsoMeshes=std::move(best.Iso);o_IsoMeshes2D=std::move(best.Charts);o_IsoMeshBoundary=std::move(best.Boundary);
     o_IsoMeshBoundary2D=std::move(best.Boundary2D);o_IsoMeshUV=std::move(best.UV);o_VertexLayerHeights=std::move(best.Heights);
-    o_VertexLayerNormals=std::move(best.Normals);_HarmonicIsoEdgeWidthIds=std::move(best.EdgeWidths);o_IsoMeshBoundaryWidthId=std::move(best.Widths);_IsoValues=std::move(best.Levels);
+    o_VertexLayerNormals=std::move(best.Normals);_HarmonicIsoEdgeWidthIds=std::move(best.EdgeWidths);o_IsoMeshBoundaryWidthId=std::move(best.Widths);o_IsoMeshBoundaryFaceTags=std::move(best.RegionTags);_IsoValues=std::move(best.Levels);
     _IsoRelaxationReport=best.Relaxation;computeField(useParallel);o_PrintPaths2D=std::move(best.Paths2D);o_PrintPaths3D=std::move(best.Paths3D);
     best.Report.AcceptedIterations=total.AcceptedIterations;best.Report.OuterIterations=total.OuterIterations;
     best.Report.Factorizations=total.Factorizations;best.Report.Milliseconds=total.Milliseconds;total=best.Report;}

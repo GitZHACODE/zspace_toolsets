@@ -241,6 +241,7 @@ ZSPACE_INLINE bool HarmonicSlicer::computeFieldImpl(bool useParallel) {
   o_PathFields.assign(totalLayers, zScalarArray());
   o_WidthFields.assign(totalLayers, zScalarArray());
   o_TrackFields.assign(totalLayers, zScalarArray());
+  o_FaceTagSources.assign(totalLayers, zTsField::FaceTagSource());
   std::vector<int> segmentCounts(totalLayers, 0);
   std::vector<char> layerPrinted(totalLayers, 0), layerSlotted(totalLayers, 0);
 
@@ -303,6 +304,14 @@ ZSPACE_INLINE bool HarmonicSlicer::computeFieldImpl(bool useParallel) {
         if (!zTsField::appendBracingSegments(o_BracingGraphs2D[k], i_Settings,
               i_Settings.BracingSlot, segments, k)) continue;
 
+      if (std::any_of(i_FaceTags.begin(), i_FaceTags.end(), [](int t){ return t > 3; })) {
+        auto &source = o_FaceTagSources[k]; source.boundary = boundary2D;
+        source.slot = boundarySlot; source.slotWidth = slotWidth;
+        source.edgeTags = o_IsoMeshBoundaryFaceTags[k]; source.edgeWidthIds = edgeIds;
+        source.widths = i_Settings.BoundaryWidth; source.doubleBoundary = i_Settings.DoubleBoundary;
+        source.overlap = i_Settings.OverlapWidth;
+        for (const auto &segment : segments) if (segment.type != 0) source.bracing.push_back(segment);
+      }
       std::vector<zScalarArray> segDistances;
       zScalarArray boundarySigns;
       zTsField::computeSegmentDistances(o_ScalarField, segments, segDistances);
@@ -386,6 +395,8 @@ ZSPACE_INLINE bool HarmonicSlicer::computePrintPathImpl(bool useParallel) {
         failed[k] = 1;
         continue;
       }
+      if (k<int(o_FaceTagSources.size()) && !o_FaceTagSources[k].edgeTags.empty())
+        for(auto &path:o_PrintPaths2D[k])if(!zTsField::labelFaceTagSegments(path,o_FaceTagSources[k]))throw std::runtime_error("Invalid FaceTag provenance");
       if (!zTsField::mapPrintPaths(o_PrintPaths2D[k], o_IsoMeshes2D[k], o_IsoMeshes[k],
                                   &o_VertexLayerHeights[k], o_PrintPaths3D[k], k,
                                   &o_VertexLayerNormals[k])) failed[k] = 1;

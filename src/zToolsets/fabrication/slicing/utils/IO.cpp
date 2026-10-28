@@ -170,7 +170,7 @@ ZSPACE_INLINE bool exportPrintPathUSD(const PrintPath &path,
     zPointArray positions;
     zFnGraph(const_cast<zObjGraph &>(path.graph)).getVertexPositions(positions);
     if (path.normals.size() != positions.size() || path.widths.size() != positions.size() ||
-        path.heights.size() != positions.size())
+        path.heights.size() != positions.size() || (!path.faceTags.empty() && path.faceTags.size()!=positions.size()))
       return fail("Normals, widths and heights must have one value per graph vertex.");
     auto ids = curves.front().Vertices;
     if (ids.size() > 1 && ids.front() == ids.back()) ids.pop_back();
@@ -178,6 +178,7 @@ ZSPACE_INLINE bool exportPrintPathUSD(const PrintPath &path,
       return fail("Print path contains insufficient or unused vertices.");
     pxr::VtArray<pxr::GfVec3f> points, normals;
     pxr::VtArray<float> widths, heights;
+    pxr::VtArray<int> faceTags;
     for (int id : ids) {
       if (id < 0 || size_t(id) >= positions.size()) return fail("Invalid path vertex index.");
       const auto &p = positions[id];
@@ -191,6 +192,7 @@ ZSPACE_INLINE bool exportPrintPathUSD(const PrintPath &path,
       normals.push_back(pxr::GfVec3f(n.x, n.y, n.z));
       widths.push_back(path.widths[id]);
       heights.push_back(path.heights[id]);
+      if(!path.faceTags.empty())faceTags.push_back(path.faceTags[id]);
     }
     const auto heightRange = std::minmax_element(heights.begin(), heights.end());
     const auto widthRange = std::minmax_element(widths.begin(), widths.end());
@@ -259,6 +261,7 @@ ZSPACE_INLINE bool exportPrintPathUSD(const PrintPath &path,
         prim.CreateAttribute(pxr::TfToken("printNormals"), pxr::SdfValueTypeNames->Normal3fArray, true).Set(normals) &&
         prim.CreateAttribute(pxr::TfToken("printWidths"), pxr::SdfValueTypeNames->FloatArray, true).Set(widths) &&
         prim.CreateAttribute(pxr::TfToken("printHeight"), pxr::SdfValueTypeNames->FloatArray, true).Set(heights);
+        if(!faceTags.empty())prim.CreateAttribute(pxr::TfToken("printFaceTags"),pxr::SdfValueTypeNames->IntArray,true).Set(faceTags);
     if (!ok) return fail("Could not author USD Gcode attributes.");
     zPointArray meshPositions;
     zIntArray meshCounts, meshConnects;
@@ -513,9 +516,9 @@ ZSPACE_INLINE bool readSlicerInputUSD(const std::string &filePath, SlicerUSDInpu
     const auto bracingWidths = usdWidthTable(settings, "BracingWidth");
     const auto faceWidthIds = usdDataIds(data, "block:widthid", counts.size());
     for (size_t f = 0; f < tags.size(); ++f) {
-      if (tags[f] != Bottom && tags[f] != Top && tags[f] != Side)
+      if (tags[f] != Bottom && tags[f] != Top && !isSideFaceTag(tags[f]))
         throw std::runtime_error("FaceTag must use Bottom=1, Top=2, Side=3.");
-      if (tags[f] == Side) {
+      if (isSideFaceTag(tags[f])) {
         if (faceWidthIds[f] < 0 || static_cast<size_t>(faceWidthIds[f]) >= boundaryWidths.size())
           throw std::runtime_error("block face widthid is outside BoundaryWidth.");
       } else if (faceWidthIds[f] != -1)

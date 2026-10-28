@@ -80,7 +80,9 @@ void bind_types(py::module_ &m) {
       .def_readwrite("normals", &PrintPath::normals)
       // Per-vertex inner(0)/outer(1) tag, parallel to widths - empty for a
       // single-perimeter path with no inner/outer distinction.
-      .def_readwrite("trackIds", &PrintPath::trackIds);
+      .def_readwrite("trackIds", &PrintPath::trackIds)
+      .def_readwrite("faceTags", &PrintPath::faceTags)
+      .def_readwrite("edgeFaceTags", &PrintPath::edgeFaceTags);
 
 }
 

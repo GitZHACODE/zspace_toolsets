@@ -106,13 +106,15 @@ public:
   zPointArray UVW;
   std::vector<bool> UVWValid;
   std::vector<TetFaceTag> FaceTags;
-  zIntArray FaceWidthIds;
+  zIntArray FaceWidthIds, FaceRegionTags, FaceGroupIds;
+  // Joint semantic IDs are used by relaxation; physical width IDs stay separate.
+  std::vector<std::pair<int,int>> SideGroups;
   std::vector<Eigen::Matrix3d> FaceBasisGradients;
   std::vector<Eigen::Matrix<double, 3, 4>> VolumeBasisGradients;
   std::vector<Eigen::Matrix4d> VolumeStiffness;
   std::vector<Eigen::Vector3d> FaceFieldGradients, VolumeFieldGradients;
   // Temporary facet-marker data consumed when building topology.
-  zIntArray SurfaceWidthIds;
+  zIntArray SurfaceWidthIds, SurfaceRegionTags;
   std::vector<TetFaceTag> SurfaceTags;
   std::pair<zFloatArray, zFloatArray> HeatValue;
   bool FieldValid = false;
@@ -158,12 +160,13 @@ protected:
 
   zObjMeshArray o_IsoMeshes2D;
   zObjGraphArray o_IsoMeshBoundary2D;
-  std::vector<zIntArray> o_IsoMeshBoundaryWidthId;
+  std::vector<zIntArray> o_IsoMeshBoundaryWidthId, o_IsoMeshBoundaryFaceTags;
 
   zObjMeshScalarField o_ScalarField;
   std::vector<zScalarArray> o_PathFields;
   std::vector<zScalarArray> o_WidthFields;
   std::vector<zScalarArray> o_TrackFields;
+  std::vector<zTsField::FaceTagSource> o_FaceTagSources;
   zObjGraphArray o_BracingGraphs2D;
 
   PrintPathArray o_PrintPaths2D;
@@ -187,6 +190,7 @@ public:
     i_FaceWidthIds = inFaceWidthIds;
     clearStructure();
   }
+  const std::vector<zTsField::FaceTagSource> &getFaceTagSources() const { return o_FaceTagSources; }
   const zIntArray &getFaceTags() const { return i_FaceTags; }
   const zIntArray &getFaceWidthIds() const { return i_FaceWidthIds; }
   const zIntArray &getVertexTags() const { return _VertexTags; }
@@ -337,6 +341,7 @@ private:
                  const zPointArray &positions, const zVector &lowToHigh,
                  std::unordered_set<std::array<int, 3>, zTsUtils::TriangleKeyHash>
                      &uniqueTriangles);
+  void decodeBoundaryGroups(int layer);
   struct WallWidthLookup;
   void extractIsoMesh(float iso, zObjMesh &mesh, zPointArray &uv,
                       const zFloatArray &vertexHeights, zFloatArray &heights,

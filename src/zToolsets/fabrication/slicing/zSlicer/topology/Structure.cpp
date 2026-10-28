@@ -136,7 +136,7 @@ inline int _faceTowardColumn(zObjMesh &mesh, int a, int b,
     }
     for (int face : candidates)
       if (face >= 0 && face < int(faceTags.size()) &&
-          faceTags[face] == static_cast<int>(VertexTag::Side))
+          isSideFaceTag(faceTags[face]))
         return face;
     return (candidates[0] >= 0) ? candidates[0] : candidates[1];
   }
@@ -500,15 +500,18 @@ ZSPACE_INLINE bool TopologySlicer::computeBasicStructureImpl(bool useParallel) {
   // 4b. Width group of the wall face between V-loop i and i + 1 along every
   //     segment of V-loop i (the boundary is split where it changes).
   _VLoopSegmentWidthIds.assign(numLoopVerts, zIntArray());
+  _VLoopSegmentFaceTags.assign(numLoopVerts, zIntArray());
   for (int i = 0; i < numLoopVerts; i++) {
     const zIntArray &ids = vLoopVertexIds[i];
     const zIntArray &next = vLoopVertexIds[(i + 1) % numLoopVerts];
     const std::unordered_set<int> nextColumn(next.begin(), next.end());
     zIntArray &groups = _VLoopSegmentWidthIds[i];
     groups.assign(ids.size() > 1 ? ids.size() - 1 : 0, 0);
+    auto &tags = _VLoopSegmentFaceTags[i]; tags.assign(groups.size(), 3);
     for (size_t k = 0; k + 1 < ids.size(); k++) {
       const int face =
           _faceTowardColumn(mesh, ids[k], ids[k + 1], nextColumn, i_FaceTags);
+      if (face >= 0) tags[k] = i_FaceTags[face];
       groups[k] = (face >= 0 && face < int(i_FaceWidthIds.size()))
                       ? i_FaceWidthIds[face]
                       : 0;

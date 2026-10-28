@@ -132,6 +132,12 @@ install(EXPORT zspaceToolsetsTargets FILE zspaceToolsetsTargets.cmake NAMESPACE 
 
 if(ZSPACE_TOOLSETS_BUILD_TESTS)
   include(CTest)
+  add_executable(zspace_toolsets_face_tags tests/smoke/zspace_toolsets_face_tags.cpp)
+  target_link_libraries(zspace_toolsets_face_tags PRIVATE zspace::toolsets)
+  add_test(NAME zspace_toolsets.slicing.face_tags COMMAND zspace_toolsets_face_tags 0)
+  if(ZSPACE_TOOLSETS_WITH_TETGEN)
+    add_test(NAME zspace_toolsets.slicing.face_tags_harmonic COMMAND zspace_toolsets_face_tags 1)
+  endif()
   add_executable(zspace_toolsets_printsyn tests/smoke/zspace_toolsets_printsyn.cpp)
   target_link_libraries(zspace_toolsets_printsyn PRIVATE zspace::toolsets)
   add_test(NAME zspace_toolsets.slicing.postprocessing COMMAND zspace_toolsets_printsyn)

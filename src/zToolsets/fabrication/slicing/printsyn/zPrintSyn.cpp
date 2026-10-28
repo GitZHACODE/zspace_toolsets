@@ -1567,6 +1567,9 @@ ZSPACE_INLINE bool zPrintSyn::projectPrintPaths(const PrintPathArray &paths2D,
         outPaths3D[l][r].graph = paths2D[l][r].graph;
         outPaths3D[l][r].widths = paths2D[l][r].widths;
         outPaths3D[l][r].trackIds = paths2D[l][r].trackIds;
+        outPaths3D[l][r].faceTags=paths2D[l][r].faceTags;
+        outPaths3D[l][r].edgeFaceTags=paths2D[l][r].edgeFaceTags;
+        outPaths3D[l][r].faceTagSegments=paths2D[l][r].faceTagSegments;
         outPaths3D[l][r].featureFlags = paths2D[l][r].featureFlags;
 
         zFnGraph fnContour(outPaths3D[l][r].graph);
@@ -1664,6 +1667,7 @@ ZSPACE_INLINE bool zPrintSyn::linkPrintPaths(const PrintPathArray &paths3D,
   zVectorArray combinedNormals;
   zFloatArray combinedTrackIds;
   zIntArray combinedEdges;
+  std::unordered_map<unsigned long long,int> combinedEdgeLabels;
   zIntArray combinedFeatures;
 
   for (const auto &ringPaths : paths3D) {
@@ -1675,6 +1679,12 @@ ZSPACE_INLINE bool zPrintSyn::linkPrintPaths(const PrintPathArray &paths3D,
       if (positions.empty())
         continue;
       const int base = static_cast<int>(combinedPositions.size());
+      zIntArray sourceEdges;fnGraph.getEdgeData(sourceEdges);
+      for(size_t e=0;e<sourceEdges.size()/2;++e)if(e<layerPath.edgeFaceTags.size())
+        combinedEdgeLabels[makeEdgeKey(base+sourceEdges[2*e],base+sourceEdges[2*e+1])]=layerPath.edgeFaceTags[e];
+      outCombined.faceTags.insert(outCombined.faceTags.end(),layerPath.faceTags.empty()?positions.size():0,0);
+      outCombined.faceTags.insert(outCombined.faceTags.end(),layerPath.faceTags.begin(),layerPath.faceTags.end());
+      for(auto segment:layerPath.faceTagSegments){for(int &id:segment.vertices)id+=base;outCombined.faceTagSegments.push_back(std::move(segment));}
       if (hasMultiplePaths) {
         zIntArray edges;
         fnGraph.getEdgeData(edges);
@@ -1735,6 +1745,10 @@ ZSPACE_INLINE bool zPrintSyn::linkPrintPaths(const PrintPathArray &paths3D,
 
   zFnGraph fnOut(outCombined.graph);
   fnOut.create(combinedPositions, combinedEdges);
+  if(!outCombined.faceTagSegments.empty())for(size_t e=0;e<combinedEdges.size();e+=2){
+    const auto it=combinedEdgeLabels.find(makeEdgeKey(combinedEdges[e],combinedEdges[e+1]));
+    outCombined.edgeFaceTags.push_back(it==combinedEdgeLabels.end()?0:it->second);
+  }
   outCombined.widths = combinedWidths;
   outCombined.featureFlags = combinedFeatures;
   if (hasHeights)
@@ -1756,9 +1770,10 @@ ZSPACE_INLINE bool zPrintSyn::computePipeline(const zObjMeshArray &charts2D,
     PrintPathArray &outPaths2D, PrintPathArray &outPaths3D,
     PrintPath &outCombined, std::string &outStatus, bool useParallel,
     const std::vector<zFloatArray> *perLayerVertexHeights,
-    const std::vector<zVectorArray> *perLayerVertexNormals) {
+    const std::vector<zVectorArray> *perLayerVertexNormals,
+    const std::vector<zTsField::FaceTagSource> *faceTagSources) {
   return computePipeline(charts2D,sections3D,vertexLayerHeights,seamMapping,settings,
-      outPaths2D,outPaths3D,outCombined,outStatus,useParallel,perLayerVertexHeights,perLayerVertexNormals,nullptr);
+      outPaths2D,outPaths3D,outCombined,outStatus,useParallel,perLayerVertexHeights,perLayerVertexNormals,nullptr,faceTagSources);
 }
 
 ZSPACE_INLINE bool zPrintSyn::computePipeline(const zObjMeshArray &charts2D,
@@ -1767,7 +1782,8 @@ ZSPACE_INLINE bool zPrintSyn::computePipeline(const zObjMeshArray &charts2D,
     PrintPathArray &outPaths2D, PrintPathArray &outPaths3D,
     PrintPath &outCombined, std::string &outStatus, bool useParallel,
     const std::vector<zFloatArray> *perLayerVertexHeights,
-    const std::vector<zVectorArray> *perLayerVertexNormals,PrintPathArray *outSurfaceContours2D) {
+    const std::vector<zVectorArray> *perLayerVertexNormals,PrintPathArray *outSurfaceContours2D,
+    const std::vector<zTsField::FaceTagSource> *faceTagSources) {
   if(outSurfaceContours2D)outSurfaceContours2D->clear();
   outPaths3D.clear();
   outCombined = PrintPath();
@@ -1794,17 +1810,25 @@ ZSPACE_INLINE bool zPrintSyn::computePipeline(const zObjMeshArray &charts2D,
     outStatus = "stopped at " + step + ": " + reason + " - the paths are kept as this step left them.";
     return true;
   };
-  if (stopAt(resamplePrintPaths(outPaths2D, settings, outStatus, &badLayers, useParallel),
+  // The final section is a fixed top constraint, not a fabrication layer.
+  const bool tagged=faceTagSources && faceTagSources->size()>=n && std::any_of(faceTagSources->begin(),faceTagSources->begin()+n,[](const auto &s){return !s.edgeTags.empty();});
+  if(faceTagSources)zTsUtils::printDebug("[FaceTagSampling] layers="+std::to_string(n)+" sources="+std::to_string(faceTagSources->size())+" enabled="+std::to_string(tagged));
+  if(tagged)for(auto &layer:outPaths2D) {
+    for(auto &path:layer)if(!reconstructCorners(path,settings.FeatureAngleTol)){outStatus="Failed FaceTag corner preparation";return false;}
+    orientLayer(layer,true);
+  }
+  if (!tagged && stopAt(resamplePrintPaths(outPaths2D, settings, outStatus, &badLayers, useParallel),
               "resamplePrintPaths")) return false;
   const bool aligned = seamMapping == SeamMapping::SharedTopology
       ? alignStartPoints(outPaths2D, charts2D, settings.SeamOffset, settings.SeamSize, outStatus, &badLayers, useParallel)
       : alignStartPoints(outPaths2D, charts2D, sections3D, settings.SeamOffset, settings.SeamSize, outStatus, &badLayers, useParallel);
   if (stopAt(aligned, "alignStartPoints")) return false;
+  if(tagged && stopAt(resampleFaceTaggedPaths(outPaths2D,*faceTagSources,settings,outStatus,&charts2D,&sections3D),"resampleFaceTaggedPaths"))return false;
   if (stopAt(projectPrintPaths(outPaths2D, charts2D, sections3D, vertexLayerHeights,
                               outPaths3D, outStatus, &badLayers, useParallel, perLayerVertexHeights, perLayerVertexNormals), "projectPrintPaths")) return false;
   if(outSurfaceContours2D)*outSurfaceContours2D=outPaths2D;
   badLayers.clear();
-  if (stopAt(resamplePrintPaths3D(outPaths2D,outPaths3D,charts2D,sections3D,settings,
+  if (!tagged && stopAt(resamplePrintPaths3D(outPaths2D,outPaths3D,charts2D,sections3D,settings,
       outStatus,useParallel,vertexLayerHeights,perLayerVertexHeights,perLayerVertexNormals),"resamplePrintPaths3D")) return false;
   if (stopAt(linkPrintPaths(outPaths3D, outCombined, outStatus), "linkPrintPaths")) return false;
   outStatus = "computePostProcess: " + std::to_string(n) + " layers processed. " + outStatus;

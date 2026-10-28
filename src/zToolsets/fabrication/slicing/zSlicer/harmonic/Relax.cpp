@@ -74,7 +74,7 @@ bool HarmonicSlicer::relaxContours(std::string &error, bool useParallel) {
     settings.MinEdgeLength=.05*i_Settings.HPrintHeight.Minimum;
   settings.Parallel=useParallel;
   zTsRelax::Reference reference;reference.Positions=_Tet.Surface.Positions;reference.Triangles=_Tet.Surface.Triangles;
-  for(int face:_Tet.SurfaceFaceIds)reference.WidthIds.push_back(_Tet.FaceTags[face]==HarmonicField::TetFaceTag::Side?_Tet.FaceWidthIds[face]:-1);
+  for(int face:_Tet.SurfaceFaceIds)reference.WidthIds.push_back(_Tet.FaceTags[face]==HarmonicField::TetFaceTag::Side?_Tet.FaceGroupIds[face]:-1);
   auto layers=relaxationLayers();
   TetSampler sampler(_Tet);
   if(!zTsRelax::relax(reference,layers,settings,[&](const zPoint &p,zPoint *uv){return sampler.sample(p,uv);},_IsoRelaxationReport,error))return false;
@@ -100,7 +100,7 @@ bool HarmonicSlicer::relaxContours(std::string &error, bool useParallel) {
 
 bool HarmonicSlicer::optimizeSurfaceHeightDomain(const std::vector<zPointArray> *targets,std::string &error,bool parallel){
   zTsRelax::Reference reference;reference.Positions=_Tet.Surface.Positions;reference.Triangles=_Tet.Surface.Triangles;
-  for(int face:_Tet.SurfaceFaceIds)reference.WidthIds.push_back(_Tet.FaceTags[face]==HarmonicField::TetFaceTag::Side?_Tet.FaceWidthIds[face]:-1);
+  for(int face:_Tet.SurfaceFaceIds)reference.WidthIds.push_back(_Tet.FaceTags[face]==HarmonicField::TetFaceTag::Side?_Tet.FaceGroupIds[face]:-1);
   auto layers=relaxationLayers();TetSampler sampler(_Tet);
   auto settings=i_Settings.HPrintHeight;
   if(!targets)settings.Iterations=(std::min)(settings.Iterations,8);
