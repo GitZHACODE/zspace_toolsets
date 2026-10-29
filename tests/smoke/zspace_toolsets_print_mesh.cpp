@@ -57,20 +57,40 @@ int main() {
     checkClosed(mesh, 8, 6);
     zPointArray points;
     zFnMesh(mesh).getVertexPositions(points);
-    const zPointArray expected = {{0, -1, -2}, {0, 1, -2},   {0, 1, 2},
-                                  {0, -1, 2},  {10, -3, -1}, {10, 3, -1},
-                                  {10, 3, 1},  {10, -3, 1}};
+    const zPointArray expected = {{0, -1, 0}, {0, 1, 0},   {0, 1, 4},
+                                  {0, -1, 4}, {10, -3, 0}, {10, 3, 0},
+                                  {10, 3, 2}, {10, -3, 2}};
     for (size_t i = 0; i < points.size(); ++i)
       require(zTsUtils::vecDistSq(points[i], expected[i]) < 1e-12,
-              "Rectangle dimension/centering mismatch");
+              "Rectangle width centering/one-sided height mismatch");
     // Width and height axes rotate with the supplied normal, rather than world
     // Z.
     auto tilted = straight;
     tilted.normals.assign(2, zVector(0, 1, 0));
     require(zTsUtils::buildPrintMesh({{tilted}}, mesh, &error), error.c_str());
     zFnMesh(mesh).getVertexPositions(points);
-    require(zTsUtils::vecDistSq(points[0], zPoint(0, -2, 1)) < 1e-12,
+    require(zTsUtils::vecDistSq(points[0], zPoint(0, 0, 1)) < 1e-12 &&
+                zTsUtils::vecDistSq(points[2], zPoint(0, 4, -1)) < 1e-12,
             "Normal was ignored");
+    // A sloping path requires projecting the normal into the section plane.
+    auto slope = path({{0, 0, 0}, {10, 0, 10}}, {0, 1});
+    require(zTsUtils::buildPrintMesh({{slope}}, mesh, &error), error.c_str());
+    zFnMesh(mesh).getVertexPositions(points);
+    const double rise = 2 * std::sqrt(2.0);
+    require(zTsUtils::vecDistSq(points[0], zPoint(0, -1, 0)) < 1e-10 &&
+                zTsUtils::vecDistSq(points[2], zPoint(-rise, 1, rise)) < 1e-10,
+            "Section is not perpendicular to the path with projected height");
+    checkClosed(mesh, 8, 6);
+    // A 3:4 corner follows the neighbor chord, not the unit-edge bisector.
+    auto corner = path({{0, 0, 0}, {3, 0, 0}, {3, 4, 0}},
+                       {0, 1, 1, 2});
+    require(zTsUtils::buildPrintMesh({{corner}}, mesh, &error), error.c_str());
+    zFnMesh(mesh).getVertexPositions(points);
+    require(zTsUtils::vecDistSq(points[4], zPoint(3.8, -0.6, 0)) < 1e-10 &&
+                zTsUtils::vecDistSq(points[5], zPoint(2.2, 0.6, 0)) < 1e-10 &&
+                zTsUtils::vecDistSq(points[6], zPoint(2.2, 0.6, 4)) < 1e-10,
+            "Corner chord weighting or forward section ordering mismatch");
+    checkClosed(mesh, 12, 10);
     auto loop = path({{0, 0, 0}, {10, 0, 0}, {10, 10, 0}, {0, 10, 0}},
                      {0, 1, 1, 2, 2, 3, 3, 0});
     require(
@@ -123,6 +143,10 @@ int main() {
     invalid.normals.assign(2, zVector(1, 0, 0));
     require(!zTsUtils::buildPrintMesh({{invalid}}, mesh, &error),
             "Parallel normal/tangent accepted");
+    invalid = path({{0, 0, 0}, {1, 0, 1}, {0, 0, 2}}, {0, 1, 1, 2});
+    require(!zTsUtils::buildPrintMesh({{invalid}}, mesh, &error) &&
+                zFnMesh(mesh).numVertices() == 0,
+            "Normal parallel to corner chord retained an invalid mesh");
     invalid =
         path({{0, 0, 0}, {1, 0, 0}, {2, 0, 0}, {1, 1, 0}}, {0, 1, 1, 2, 1, 3});
     require(!zTsUtils::buildPrintMesh({{invalid}}, mesh, &error),
@@ -132,7 +156,8 @@ int main() {
             "Zero segment accepted");
     require(!zTsUtils::buildPrintMesh({}, mesh, &error),
             "Empty paths accepted");
-    std::cout << "PASS print mesh rectangles, normals, closures, separate "
+    std::cout << "PASS print mesh one-sided rectangles, projected normals, "
+                 "weighted corner chords, closures, separate "
                  "paths and invalid inputs\n";
     return 0;
   } catch (const std::exception &e) {

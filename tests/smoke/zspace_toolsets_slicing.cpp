@@ -268,8 +268,98 @@ void tetRefinement() {
 #endif
 }
 
+void harmonicPrintNormals() {
+#ifdef ZSPACE_TOOLSETS_WITH_TETGEN
+  using V=Eigen::Vector3d;
+  const auto checkNormals=[](const PrintPathArray &paths,const V &direction,double minimum){
+    require(!paths.empty()&&!paths.front().empty(),"Missing fabrication layers");
+    for(const auto &layer:paths)for(const auto &path:layer){
+      require(path.normals.size()==size_t(zFnGraph(const_cast<zObjGraph&>(path.graph)).numVertices()),"Fabrication normals lost alignment");
+      for(const auto &n:path.normals){const auto normal=zTsUtils::toEigenVec(n);
+        require(normal.allFinite()&&std::abs(normal.norm()-1)<2e-5&&normal.dot(direction)>minimum,
+          "Print normal points away from increasing harmonic layers");}
+    }
+  };
+  const auto checkMesh=[](const PrintPathArray &paths,const V &direction,double minimum){
+    zObjMesh mesh;std::string error;require(zTsUtils::buildPrintMesh({paths.front()},mesh,&error),error);
+    zPointArray vertices;zFnMesh(mesh).getVertexPositions(vertices);size_t cursor=0;
+    for(const auto &path:paths.front()){
+      zPointArray points;zFnGraph(const_cast<zObjGraph&>(path.graph)).getVertexPositions(points);
+      std::vector<zTsUtils::GraphPolyline> curves;require(zTsUtils::graphPolylines(path.graph,curves),"Invalid normal test path");
+      for(const auto &curve:curves)for(int id:curve.Vertices){
+        const V bottom=.5*(zTsUtils::toEigenVec(vertices.at(cursor))+zTsUtils::toEigenVec(vertices.at(cursor+1)));
+        const V top=.5*(zTsUtils::toEigenVec(vertices.at(cursor+2))+zTsUtils::toEigenVec(vertices.at(cursor+3)));
+        require((bottom-zTsUtils::toEigenVec(points[id])).norm()<5e-6,"Print-mesh height became centered across the path");
+        require((top-bottom).dot(direction)>minimum*path.heights[id],"Print mesh grows away from the next layer");
+        cursor+=4;
+      }
+    }
+    require(cursor==vertices.size(),"Print mesh normal test missed a profile");
+  };
+  for(int shape=0;shape<3;++shape)for(int iterations:{0,2}){
+    // Includes a direction with NEGATIVE world Z. Fabrication orientation must
+    // follow the tagged cap, not any global-axis sign convention.
+    const double angle=shape==1?2.1:.6;const double c=std::cos(angle),s=std::sin(angle),cz=std::cos(.35),sz=std::sin(.35);
+    const V direction(cz*s,sz*s,c);PrintPathArray serial;
+    for(bool parallel:{false,true}){
+      auto mesh=block();zFnMesh source(mesh);auto *p=source.getRawVertexPositions();
+      for(int i=0;i<source.numVertices();++i){const auto q=p[i];
+        const double z=q.z+(shape==2&&i==2?.15:0),x=c*q.x+s*z,y=q.y;
+        p[i]=zPoint(3+cz*x-sz*y,-2+sz*x+cz*y,1-s*q.x+c*z);
+      }
+      zPointArray inputPoints;zIntArray inputCounts,inputFaces;source.getVertexPositions(inputPoints);source.getPolygonData(inputFaces,inputCounts);
+      zTsSlicing session;configure(session,mesh);session.setSlicerMode(zTsSlicerMode::Harmonic);
+      session.setSlotAnchor(inputPoints.front());auto &settings=session.getSettings();
+      // Three intervals avoid an iso exactly on the block's middle source
+      // ring, a separate float contour/mapping degeneracy under rigid rotation.
+      settings.LayerSpacing=.7f;settings.FieldCellSize=.15f;
+      settings._HIsoRelaxIterations=iterations;settings.HPrintHeight.Enabled=shape==0&&iterations>0;
+      if(settings.HPrintHeight.Enabled){settings.HPrintHeight.Minimum=.6;settings.HPrintHeight.Maximum=.75;}
+      require(session.computeSlicer(parallel),"Normal regression slicing: "+session.getStatus());
+      auto *harmonic=session.getHarmonicSlicer();auto &cap=harmonic->getIsoMeshes().front();
+      zPointArray capPoints;zIntArray capCounts,capFaces;zFnMesh(cap).getVertexPositions(capPoints);zFnMesh(cap).getPolygonData(capFaces,capCounts);
+      size_t offset=0;for(int count:capCounts){require(count==3,"Expected triangular cap");
+        const V a=zTsUtils::toEigenVec(capPoints[capFaces[offset]]),b=zTsUtils::toEigenVec(capPoints[capFaces[offset+1]]),d=zTsUtils::toEigenVec(capPoints[capFaces[offset+2]]);
+        require((b-a).cross(d-a).dot(direction)<0,"Bottom solid cap lost its outward winding");offset+=count;}
+      const auto &overrideNormals=harmonic->getVertexLayerNormals();
+      require(overrideNormals.size()==harmonic->getIsoMeshes().size()&&overrideNormals.front().size()==capPoints.size(),"Missing fabrication-only cap override");
+      for(const auto &n:overrideNormals.front())require(zTsUtils::toEigenVec(n).dot(direction)>.9,"Nonplanar cap override is not locally inward");
+      if(iterations==0)for(size_t k=1;k<overrideNormals.size();++k)require(overrideNormals[k].empty(),"Disabled relaxation acquired unrelated normal overrides");
+      require(session.computePrintPath(parallel),session.getStatus());
+      require(session.get3DPrintPaths().size()>1,"Missing first/second fabrication layers");
+      checkNormals(session.get3DPrintPaths(),direction,shape==2?.9:.999);
+      const auto raw=session.get3DPrintPaths();checkMesh(raw,direction,shape==2?.8:.99);
+      require(session.computePrintPath(parallel),session.getStatus());
+      for(size_t l=0;l<raw.size();++l)for(size_t k=0;k<raw[l].size();++k){
+        const auto &a=raw[l][k].normals,&b=session.get3DPrintPaths()[l][k].normals;
+        require(a.size()==b.size(),"Repeated raw projection changed normal count");
+        for(size_t j=0;j<a.size();++j)require(zTsUtils::vecDistSq(a[j],b[j])==0,"Repeated projection double-flipped cap normals");}
+      require(session.computePostProcess(parallel),"Normal regression postprocess: "+session.getStatus());
+      checkNormals(session.get3DPrintPaths(),direction,shape==2?.9:.999);checkMesh(session.get3DPrintPaths(),direction,shape==2?.8:.99);
+      checkNormals(PrintPathArray{{session.getResultantPrintPath()}},direction,shape==2?.9:.999);
+      const auto result=session.get3DPrintPaths();
+      require(session.computePostProcess(parallel),session.getStatus());checkNormals(session.get3DPrintPaths(),direction,shape==2?.9:.999);
+      auto &currentCap=harmonic->getIsoMeshes().front();
+      zPointArray unchanged;zIntArray faces,counts;zFnMesh(currentCap).getVertexPositions(unchanged);zFnMesh(currentCap).getPolygonData(faces,counts);
+      require(faces==capFaces&&counts==capCounts&&unchanged.size()==capPoints.size(),"Fabrication override changed solid cap topology");
+      for(size_t i=0;i<unchanged.size();++i)require(zTsUtils::vecDistSq(unchanged[i],capPoints[i])==0,"Fabrication override moved a cap vertex");
+      if(shape==1&&iterations==0){
+        require(harmonic->computeContours(parallel)&&harmonic->computeField(parallel),"Normal overrides did not survive contour recomputation");
+        require(session.computePrintPath(parallel),session.getStatus());checkNormals(session.get3DPrintPaths(),direction,.999);
+      }
+      if(!parallel)serial=result;else{require(serial.size()==result.size(),"Parallel fabrication layer count differs");
+        for(size_t l=0;l<serial.size();++l){require(serial[l].size()==result[l].size(),"Parallel fabrication path count differs");
+          for(size_t k=0;k<serial[l].size();++k){const auto &a=serial[l][k],&b=result[l][k];
+            require(a.heights==b.heights&&a.normals.size()==b.normals.size(),"Parallel fabrication attributes differ");
+            for(size_t j=0;j<a.normals.size();++j)require(zTsUtils::vecDistSq(a.normals[j],b.normals[j])<1e-10,"Parallel fabrication normals differ");}}}
+    }
+  }
+#endif
+}
+
 void harmonic() {
 #ifdef ZSPACE_TOOLSETS_WITH_TETGEN
+  harmonicPrintNormals();
   auto mesh = block();
   zTsSlicing session;
   configure(session, mesh);
@@ -428,6 +518,8 @@ void harmonic() {
   zTsSlicing adaptive;configure(adaptive,mesh);adaptive.setSlicerMode(zTsSlicerMode::Harmonic);
   auto &adaptiveTarget=adaptive.getSettings().HPrintHeight;adaptiveTarget=target;adaptiveTarget.AllowLayerCountChange=true;
   require(adaptive.computeSlicer(false)&&adaptive.computePostProcess(false),adaptive.getStatus());
+  for(const auto &layer:adaptive.get3DPrintPaths())for(const auto &path:layer)for(const auto &n:path.normals)
+    require(n.z>0,"Surface/count feedback lost fabrication normal orientation");
   require(adaptive.getHarmonicSlicer()->getIsoMeshes().size()<impossible.getHarmonicSlicer()->getIsoMeshes().size(),"Adaptive count did not remove an unnecessary layer");
   for(float h:adaptive.getResultantPrintPath().heights)require(h>=.8&&h<=1,"Count adaptation claimed a false domain");
   zTsSlicing scheduled;configure(scheduled,mesh);scheduled.setSlicerMode(zTsSlicerMode::Harmonic);

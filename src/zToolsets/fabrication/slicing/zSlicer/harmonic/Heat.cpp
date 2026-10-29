@@ -187,6 +187,7 @@ ZSPACE_INLINE bool HarmonicSlicer::columnLengths(double &outShortest, double &ou
 }
 
 ZSPACE_INLINE bool HarmonicSlicer::computeHeatDistances() {
+  zTsUtils::ScopedSlicingTiming methodTiming("HarmonicSlicer.computeHeatDistances");
   const bool success = computeHeatDistancesImpl();
   if (success) zTsUtils::printSuccess("[HarmonicSlicer::computeHeatDistances] Success");
   else zTsUtils::printError("[HarmonicSlicer::computeHeatDistances] Failed");

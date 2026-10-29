@@ -37,6 +37,7 @@ struct SurfaceFootprint {
 bool surfaceFootprint(const PrintPathArray &curves,const zObjMeshArray &charts,
     const zObjMeshArray &sections,const std::vector<zFloatArray> &heights,
     const PrintHeightOptimizationSettings &domain,bool parallel,SurfaceFootprint &out,std::string &error){
+  zTsUtils::ScopedSlicingTiming footprintTiming("HarmonicPostProcess.surfaceFootprint");
   out=SurfaceFootprint();out.Targets.resize(curves.size());std::vector<double> low(curves.size(),out.Minimum),high(curves.size(),0);
   std::vector<int> bad(curves.size(),0);std::vector<std::string> errors(curves.size());zTsDetail::ParallelErrors failures(curves.size());
   #pragma omp parallel for schedule(dynamic) if(parallel)
@@ -83,6 +84,7 @@ bool surfaceFootprint(const PrintPathArray &curves,const zObjMeshArray &charts,
 //--------------------------
 
 ZSPACE_INLINE bool HarmonicSlicer::computeSlicer(bool useParallel) {
+  zTsUtils::ScopedSlicingTiming methodTiming("HarmonicSlicer.computeSlicer");
   const bool success = computeSlicerImpl(useParallel);
   if (success) zTsUtils::printSuccess("[HarmonicSlicer::computeSlicer] Success");
   else zTsUtils::printError("[HarmonicSlicer::computeSlicer] Failed");
@@ -109,6 +111,7 @@ ZSPACE_INLINE bool HarmonicSlicer::computeSlicerImpl(bool useParallel) {
 // o_PrintPaths3D for inspection (no o_ResultantPrintPath), _Status names the
 // step and its layers, and false is returned.
 ZSPACE_INLINE bool HarmonicSlicer::computePostProcess(const PrintSynSetting &settings, bool useParallel) {
+  zTsUtils::ScopedSlicingTiming methodTiming("HarmonicSlicer.computePostProcess");
   const bool success = computePostProcessImpl(settings, useParallel);
   if (success) updatePrintStatistics(true);
   else resetPrintStatistics();
@@ -119,6 +122,7 @@ ZSPACE_INLINE bool HarmonicSlicer::computePostProcess(const PrintSynSetting &set
 
 
 bool HarmonicSlicer::rebuildSurfaceCharts(bool parallel){
+  zTsUtils::ScopedSlicingTiming methodTiming("HarmonicSlicer.rebuildSurfaceCharts");
   const int count=int(o_IsoMeshes.size());std::vector<char> valid(count,0);zTsDetail::ParallelErrors failures(count);
   #pragma omp parallel for schedule(dynamic) if(parallel)
   for(int k=0;k<count;++k){try{zPointArray world,flat;

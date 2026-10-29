@@ -45,6 +45,7 @@ using namespace zTsUtils;
 // Face-by-face unfolding (zTsUnroll): one dual-graph BSF order from layer 0,
 // shared by every layer (all have the U-mesh's topology).
 ZSPACE_INLINE bool TopologySlicer::computeUnroll(bool useParallel) {
+  zTsUtils::ScopedSlicingTiming methodTiming("TopologySlicer.computeUnroll");
   const bool success = computeUnrollImpl(useParallel);
   if (success) zTsUtils::printSuccess("[TopologySlicer::computeUnroll] Success");
   else zTsUtils::printError("[TopologySlicer::computeUnroll] Failed");

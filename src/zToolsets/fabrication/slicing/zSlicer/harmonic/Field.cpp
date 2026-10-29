@@ -67,6 +67,7 @@ void subdivideGraphEdges(const zPointArray &points, const zIntArray &edges, doub
 // the layer's o_IsoMeshUV and realized with the same barycentric coordinates
 // on o_IsoMeshes2D.
 ZSPACE_INLINE bool HarmonicSlicer::computeField(bool useParallel) {
+  zTsUtils::ScopedSlicingTiming methodTiming("HarmonicSlicer.computeField");
   const bool success = computeFieldImpl(useParallel);
   if (success) zTsUtils::printSuccess("[HarmonicSlicer::computeField] Success");
   else zTsUtils::printError("[HarmonicSlicer::computeField] Failed");
@@ -350,6 +351,7 @@ ZSPACE_INLINE bool HarmonicSlicer::computeFieldImpl(bool useParallel) {
 }
 
 ZSPACE_INLINE bool HarmonicSlicer::computePrintPath(bool useParallel) {
+  zTsUtils::ScopedSlicingTiming methodTiming("HarmonicSlicer.computePrintPath");
   const bool success = computePrintPathImpl(useParallel);
   if (success) updatePrintStatistics(false);
   else resetPrintStatistics();
@@ -395,8 +397,10 @@ ZSPACE_INLINE bool HarmonicSlicer::computePrintPathImpl(bool useParallel) {
         failed[k] = 1;
         continue;
       }
-      if (k<int(o_FaceTagSources.size()) && !o_FaceTagSources[k].edgeTags.empty())
-        for(auto &path:o_PrintPaths2D[k])if(!zTsField::labelFaceTagSegments(path,o_FaceTagSources[k]))throw std::runtime_error("Invalid FaceTag provenance");
+      if (k<int(o_FaceTagSources.size()) && !o_FaceTagSources[k].edgeTags.empty()) {
+        const zTsField::FaceTagQuery query(o_FaceTagSources[k]);
+        for(auto &path:o_PrintPaths2D[k])if(!zTsField::labelFaceTagSegments(path,query))throw std::runtime_error("Invalid FaceTag provenance");
+      }
       if (!zTsField::mapPrintPaths(o_PrintPaths2D[k], o_IsoMeshes2D[k], o_IsoMeshes[k],
                                   &o_VertexLayerHeights[k], o_PrintPaths3D[k], k,
                                   &o_VertexLayerNormals[k])) failed[k] = 1;

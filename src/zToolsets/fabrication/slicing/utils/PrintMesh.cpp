@@ -63,35 +63,41 @@ bool buildPrintMesh(const PrintPathArray &layers, zObjMesh &outMesh,
           visited += n;
           const int base = static_cast<int>(vertices.size());
           const size_t segments = curve.Closed ? n : n - 1;
-          std::vector<zVector> directions;
-          for (size_t i = 0; i < segments; ++i)
-            directions.push_back(
-                unit(vecSub(points[ids[(i + 1) % n]], points[ids[i]]),"edge"));
+          std::vector<zVector> edges;
+          for (size_t i = 0; i < segments; ++i) {
+            edges.push_back(vecSub(points[ids[(i + 1) % n]], points[ids[i]]));
+            unit(edges.back(), "edge");
+          }
           for (size_t i = 0; i < n; ++i) {
             const int id = ids[i];
             const zVector normal = unit(path.normals[id],"normal");
             const zVector incoming =
-                directions[i == 0 ? (curve.Closed ? segments - 1 : 0) : i - 1];
+                edges[i == 0 ? (curve.Closed ? segments - 1 : 0) : i - 1];
             const zVector outgoing =
-                directions[i < segments ? i : segments - 1];
-            // Average unit edge directions at corners. A reversal uses the
-            // outgoing edge; reject a path wholly parallel to its print normal.
+                edges[i < segments ? i : segments - 1];
+            // Rhino-style neighbor chord: retain edge lengths at corners.
+            // Keep its sign forward at endpoints and interiors so section
+            // ordering does not flip. A complete reversal uses the outgoing edge.
             zVector tangent(incoming.x + outgoing.x, incoming.y + outgoing.y,
                             incoming.z + outgoing.z);
-            zVector width = vecCross(normal, tangent);
-            if (vecDot(width, width) <= 1e-24)
-              width = vecCross(normal, outgoing);
-            if (vecDot(width, width) <= 1e-24)
-              width = vecCross(normal, incoming);
-            width = unit(width,"cross-section width");
-            const double w = path.widths[id] * 0.5, h = path.heights[id] * 0.5;
+            if (vecDot(tangent, tangent) <= 1e-24)
+              tangent = outgoing;
+            tangent = unit(tangent, "path tangent");
+            // The section is perpendicular to the chord. Its height axis is
+            // the print normal projected into that plane, matching Rhino's
+            // planar VectorAngle alignment.
+            const zVector width = unit(vecCross(normal, tangent),
+                                       "cross-section width");
+            const zVector height = unit(vecCross(tangent, width),
+                                        "cross-section height");
+            const double w = path.widths[id] * 0.5, h = path.heights[id];
             for (const auto &sign :
-                 {std::array<int, 2>{-1, -1}, {1, -1}, {1, 1}, {-1, 1}}) {
+                 {std::array<int, 2>{-1, 0}, {1, 0}, {1, 1}, {-1, 1}}) {
               const auto &center = points[id];
               zPoint corner(
-                  center.x + sign[0] * w * width.x + sign[1] * h * normal.x,
-                  center.y + sign[0] * w * width.y + sign[1] * h * normal.y,
-                  center.z + sign[0] * w * width.z + sign[1] * h * normal.z);
+                  center.x + sign[0] * w * width.x + sign[1] * h * height.x,
+                  center.y + sign[0] * w * width.y + sign[1] * h * height.y,
+                  center.z + sign[0] * w * width.z + sign[1] * h * height.z);
               if (!finite(corner))
                 throw std::runtime_error("Section coordinate overflow.");
               vertices.push_back(corner);

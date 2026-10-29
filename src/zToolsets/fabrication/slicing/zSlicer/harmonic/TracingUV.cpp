@@ -531,6 +531,7 @@ ZSPACE_INLINE bool HarmonicSlicer::traceWallToBottom(int vertexId, const WallTra
 }
 
 ZSPACE_INLINE bool HarmonicSlicer::computeVolumetricParameterization(bool useParallel) {
+  zTsUtils::ScopedSlicingTiming methodTiming("HarmonicSlicer.computeVolumetricParameterization");
   const bool success = computeVolumetricParameterizationImpl(useParallel);
   if (success) zTsUtils::printSuccess("[HarmonicSlicer::computeVolumetricParameterization] Success");
   else zTsUtils::printError("[HarmonicSlicer::computeVolumetricParameterization] Failed");

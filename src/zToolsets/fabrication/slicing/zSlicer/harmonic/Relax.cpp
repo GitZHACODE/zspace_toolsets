@@ -49,6 +49,34 @@ public:
     }return false;
   }
 };
+
+// Cap triangles retain the solid's outward winding for all solver operations.
+// Fabrication starts at the bottom and deposits into the solid, toward higher
+// harmonic layers. Supply that inward direction only to path projection.
+// Rebuild from geometry, never negate a previous override (repeated runs are
+// idempotent). relaxationLayers() intentionally does not import this table.
+bool prepareBottomPrintNormals(zObjMeshArray &meshes,
+    std::vector<zVectorArray> &normals,std::string &error) {
+  zTsUtils::ScopedSlicingTiming methodTiming("HarmonicSlicer.preparePrintCapNormals");
+  if(meshes.empty()){error="No bottom cap for fabrication normals.";return false;}
+  zPointArray points;zIntArray counts,connects;zFnMesh cap(meshes.front());
+  cap.getVertexPositions(points);cap.getPolygonData(connects,counts);
+  std::vector<Eigen::Vector3d> inward(points.size(),Eigen::Vector3d::Zero());size_t offset=0;
+  for(int count:counts){for(int i=1;i+1<count;++i){const int ids[]={connects[offset],connects[offset+i],connects[offset+i+1]};
+      const auto a=zTsUtils::toEigenVec(points[ids[0]]),b=zTsUtils::toEigenVec(points[ids[1]]),c=zTsUtils::toEigenVec(points[ids[2]]);
+      const Eigen::Vector3d normal=(c-a).cross(b-a);
+      if(!normal.allFinite()){error="Nonfinite bottom-cap fabrication normal.";return false;}
+      for(int id:ids)inward[id]+=normal;
+    }offset+=count;
+  }
+  zVectorArray result;result.reserve(points.size());
+  for(auto &normal:inward){const double length=normal.norm();
+    if(!std::isfinite(length)||length<=0){error="Unsupported bottom-cap fabrication normal.";return false;}
+    normal/=length;result.emplace_back(normal.x(),normal.y(),normal.z());
+  }
+  if(result.empty()){error="Empty bottom-cap fabrication normal table.";return false;}
+  normals.resize(meshes.size());normals.front()=std::move(result);return true;
+}
 }
 
 std::vector<zTsRelax::Layer> HarmonicSlicer::relaxationLayers() const {
@@ -63,6 +91,7 @@ std::vector<zTsRelax::Layer> HarmonicSlicer::relaxationLayers() const {
 }
 
 bool HarmonicSlicer::relaxContours(std::string &error, bool useParallel) {
+  zTsUtils::ScopedSlicingTiming methodTiming("HarmonicSlicer.relaxContours");
   o_VertexLayerNormals.assign(o_IsoMeshes.size(),zVectorArray());
   zTsRelax::Settings settings;
   settings.Iterations=i_Settings._HIsoRelaxIterations;
@@ -78,7 +107,7 @@ bool HarmonicSlicer::relaxContours(std::string &error, bool useParallel) {
   auto layers=relaxationLayers();
   TetSampler sampler(_Tet);
   if(!zTsRelax::relax(reference,layers,settings,[&](const zPoint &p,zPoint *uv){return sampler.sample(p,uv);},_IsoRelaxationReport,error))return false;
-  if(settings.Iterations==0)return true;
+  if(settings.Iterations==0)return prepareBottomPrintNormals(o_IsoMeshes,o_VertexLayerNormals,error);
   for(size_t k=0;k<layers.size();++k){if(k>0&&k+1<layers.size()){
       if(settings.MinEdgeLength>0){zIntArray counts(layers[k].Triangles.size(),3),connects;for(const auto &t:layers[k].Triangles)connects.insert(connects.end(),t.begin(),t.end());zFnMesh(o_IsoMeshes[k]).create(layers[k].Positions,counts,connects);}
       else zFnMesh(o_IsoMeshes[k]).setVertexPositions(layers[k].Positions);}
@@ -95,10 +124,11 @@ bool HarmonicSlicer::relaxContours(std::string &error, bool useParallel) {
       <<" geometryConstrainedVertices="<<_IsoRelaxationReport.GeometryConstrainedVertices
       <<" lastRejectedStep="<<_IsoRelaxationReport.LastRejectedReason
       <<" boundaryHeightPlaneEstimates="<<_IsoRelaxationReport.PlaneHeightEstimates;
-  zTsUtils::printDebug(report.str());return true;
+  zTsUtils::printDebug(report.str());return prepareBottomPrintNormals(o_IsoMeshes,o_VertexLayerNormals,error);
 }
 
 bool HarmonicSlicer::optimizeSurfaceHeightDomain(const std::vector<zPointArray> *targets,std::string &error,bool parallel){
+  zTsUtils::ScopedSlicingTiming methodTiming("HarmonicSlicer.optimizeSurfaceHeightDomain");
   zTsRelax::Reference reference;reference.Positions=_Tet.Surface.Positions;reference.Triangles=_Tet.Surface.Triangles;
   for(int face:_Tet.SurfaceFaceIds)reference.WidthIds.push_back(_Tet.FaceTags[face]==HarmonicField::TetFaceTag::Side?_Tet.FaceGroupIds[face]:-1);
   auto layers=relaxationLayers();TetSampler sampler(_Tet);
@@ -115,6 +145,6 @@ bool HarmonicSlicer::optimizeSurfaceHeightDomain(const std::vector<zPointArray> 
     o_IsoMeshUV[k].swap(layers[k].UV);o_VertexLayerHeights[k].swap(layers[k].Heights);o_VertexLayerNormals[k].swap(layers[k].Normals);}
   const auto &h=_PrintHeightOptimizationReport;std::ostringstream message;message<<"[surfaceHeightOptimizer] iterations="<<h.AcceptedIterations<<" factors="<<h.Factorizations<<" domain=["<<h.Minimum<<","<<h.Maximum
     <<"] violations="<<h.ViolatingVertices<<" worst="<<h.WorstViolation<<" timeMs="<<h.Milliseconds<<" constrained="<<h.LastRejectedReason;
-  zTsUtils::printDebug(message.str());return true;
+  zTsUtils::printDebug(message.str());return prepareBottomPrintNormals(o_IsoMeshes,o_VertexLayerNormals,error);
 }
 } // namespace zSpace

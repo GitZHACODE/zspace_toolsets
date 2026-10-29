@@ -109,7 +109,10 @@ void projectedAnchors() {
     for(const auto &segment:paths[l][0].faceTagSegments)actual[segment.tag]+=int(segment.vertices.size());
     if(!l)expected=actual;else require(actual==expected,"Projected-anchor repair changed the cross-layer budget");
   }
-  bool combined=false;for(int mask:paths[0][0].featureFlags)combined|=(mask&3)==3;require(combined,"Projected-anchor repair lost a feature identity");
+  for(const auto &layer:paths){const auto &p=layer[0];
+    require(zPrintSyn::featureVertexIds(p,91)==zPrintSyn::cornerVertexIds(p,91),"Projected repair used historical feature masks");
+    require(std::none_of(p.featureFlags.begin(),p.featureFlags.end(),[](int mask){return mask&PrintPath::IntersectionFeature;}),
+      "Projected repair retained stale intersection identities");}
   PrintPathArray mapped(2);zFloatArray heights(4,.2f);
   for(int l=0;l<2;++l)require(zTsField::mapPrintPaths(paths[l],charts[l],sections[l],&heights,mapped[l],l),"Cannot map repaired anchors");
   zObjMesh mesh;require(zTsUtils::buildPrintMesh(mapped,mesh,&status),status);

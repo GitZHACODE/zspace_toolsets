@@ -82,6 +82,7 @@ bool _getboundingrect(const zObjMeshArray &unrollMeshes,
 // Builds the SDF path/width/track fields per layer. Stops here - isocontour
 // extraction into PrintPaths is zPrintSyn::extractTrackPaths now.
 ZSPACE_INLINE bool TopologySlicer::computeField(bool useParallel) {
+  zTsUtils::ScopedSlicingTiming methodTiming("TopologySlicer.computeField");
   const bool success = computeFieldImpl(useParallel);
   if (success) zTsUtils::printSuccess("[TopologySlicer::computeField] Success");
   else zTsUtils::printError("[TopologySlicer::computeField] Failed");
@@ -365,6 +366,7 @@ ZSPACE_INLINE void TopologySlicer::_layerEdgeFaceTags(int layer, int totalLayers
 }
 
 ZSPACE_INLINE bool TopologySlicer::computePrintPath(bool useParallel) {
+  zTsUtils::ScopedSlicingTiming methodTiming("TopologySlicer.computePrintPath");
   const bool success = computePrintPathImpl(useParallel);
   if (success) updatePrintStatistics(false);
   else resetPrintStatistics();
@@ -403,9 +405,11 @@ ZSPACE_INLINE bool TopologySlicer::computePrintPathImpl(bool useParallel) {
         failed[k] = 1;
         continue;
       }
-      if (k < int(o_FaceTagSources.size()) && !o_FaceTagSources[k].edgeTags.empty())
+      if (k < int(o_FaceTagSources.size()) && !o_FaceTagSources[k].edgeTags.empty()) {
+        const zTsField::FaceTagQuery query(o_FaceTagSources[k]);
         for (auto &path : o_PrintPaths2D[k])
-          if (!zTsField::labelFaceTagSegments(path, o_FaceTagSources[k], false)) throw std::runtime_error("Invalid FaceTag provenance");
+          if (!zTsField::labelFaceTagSegments(path, query, false)) throw std::runtime_error("Invalid FaceTag provenance");
+      }
       if (!zTsField::mapPrintPaths(o_PrintPaths2D[k], o_IsoMeshes2D[k], o_IsoMeshes[k],
                                   &_VLength, o_PrintPaths3D[k], k)) failed[k] = 1;
     } catch (...) { parallelErrors2.capture(k); }

@@ -15,6 +15,7 @@ zPoint point(const V &v){return zPoint(v.x(),v.y(),v.z());}
 bool resampleMapped(PrintPath &path2D,PrintPath &path3D,const zPointArray &chart,
                     const zTsDetail::SurfaceQuery &surface,double spacing,
                     const zFloatArray *heights,const zVectorArray *normals,std::string &error){
+  zTsUtils::ScopedSlicingTiming methodTiming("PrintSyn.resampleMapped", true);
   zPointArray p,q;zFnGraph(path3D.graph).getVertexPositions(p);zFnGraph(path2D.graph).getVertexPositions(q);
   const size_t n=p.size();if(n==0)return true;
   const auto valid=[&](size_t count){return count==0||count==n;};
@@ -75,6 +76,7 @@ bool zPrintSyn::resamplePrintPaths3D(PrintPathArray &paths2D,PrintPathArray &pat
     const zObjMeshArray &charts2D,const zObjMeshArray &sections3D,const PrintSynSetting &settings,
     std::string &status,bool useParallel,const zFloatArray *vertexHeights,
     const std::vector<zFloatArray> *perLayerHeights,const std::vector<zVectorArray> *perLayerNormals){
+  zTsUtils::ScopedSlicingTiming methodTiming("PrintSyn.resamplePrintPaths3D");
   const int n=int(paths3D.size());if(n==0||paths2D.size()!=size_t(n)||charts2D.size()<size_t(n)||sections3D.size()<size_t(n)||!std::isfinite(settings.ResampleLength)||settings.ResampleLength<=0){status="Invalid second 3D sampling inputs.";return false;}
   if((perLayerHeights&&perLayerHeights->size()<size_t(n))||(perLayerNormals&&perLayerNormals->size()<size_t(n))){status="Missing mapped layer attribute tables.";return false;}
   std::vector<std::string> errors(n);zTsDetail::ParallelErrors failures(n);

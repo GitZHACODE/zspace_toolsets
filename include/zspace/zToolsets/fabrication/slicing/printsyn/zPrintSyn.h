@@ -29,9 +29,9 @@ namespace zSpace {
  *	\brief Configuration settings for 2D toolpath cleanup and resampling.
  */
 struct PrintSynSetting {
-  // First-pass spacing uses 2D chart arc length. Final targets are redistributed
-  // along the mapped 3D polyline between mandatory angle/intersection features.
-  // Nearby ordinary samples yield to feature clearance; short feature spans stay exact.
+  // Sampling uses 2D chart arc length; projection preserves those targets.
+  // Tagged paths share per-FaceTag count budgets across layers. The production
+  // pipeline does not run a second resampling pass after mapping into 3D.
   float ResampleLength = 0.1f;
   // Retained for settings/layout compatibility. The restored sharp-feature
   // sampler does not use this setting or add curvature-support targets.
@@ -53,7 +53,9 @@ struct PrintSynSetting {
  *  computePostProcess() runs computePipeline() on its own paths/charts/
  *  sections, selecting the seam mapping strategy. The stage order is:
  *    resamplePrintPaths -> alignStartPoints ->
- *    projectPrintPaths -> resamplePrintPaths3D -> linkPrintPaths
+ *    projectPrintPaths -> linkPrintPaths
+ *  FaceTag paths use fixed-count sampling after seam alignment instead of
+ *  generic 2D resampling. Neither route resamples the projected 3D targets.
  *  Each method prints its own "[zPrintSyn::...]" success/failure line and
  *  writes the same message to outStatus. outBadLayers (optional) gets the
  *  layers the step reports a problem on (sorted; empty if none) - a step can
@@ -66,13 +68,12 @@ public:
 
   // Current geometric corners (open endpoints excluded), using FeatureAngleTol.
   static zIntArray cornerVertexIds(const PrintPath &path, float angleThreshold);
-  // Recorded angle/intersection features. Paths without feature metadata fall
-  // back to geometric angle detection.
+  // Re-detect current geometric corners; recorded metadata does not create
+  // feature targets or override the supplied angle threshold.
   static zIntArray featureVertexIds(const PrintPath &path, float fallbackAngleThreshold);
   // Reconstruct XY corner groups from two non-corner vertices on each side.
   // Parallel/degenerate groups or groups without enough support are preserved.
-  // Records AngleFeature/IntersectionFeature bits; previously recorded features
-  // are anchors and are not reconstructed again.
+  // Re-detects corners from geometry and refreshes featureFlags after rebuilding.
   static bool reconstructCorners(PrintPath &path, float angleThreshold);
 
 
@@ -92,7 +93,7 @@ public:
                                const std::vector<zTsField::FaceTagSource> *faceTagSources = nullptr);
 
   // Same production result; optional owned COPY of the successfully mapped,
-  // seam-trimmed processed 2D contours before final target sampling. This is
+  // seam-trimmed processed 2D contours corresponding to the final 3D targets. This is
   // internal validation geometry, never an additional fabrication target list.
   // The pointer is explicit to keep existing calls and their ABI unambiguous.
   // Its output is cleared on entry and on any pipeline failure.
@@ -107,13 +108,22 @@ public:
                                PrintPathArray *outSurfaceContours2D,
                                const std::vector<zTsField::FaceTagSource> *faceTagSources = nullptr);
 
+  // Geometric corners and categorical transitions closer than 0.01 mm along
+  // the chart or printable section coalesce before global budget allocation.
+  // Exact corner coordinates win over transition coordinates. Dense ordinary
+  // contour vertices are retained; fixed tag counts must fit this clearance.
   static bool resampleFaceTaggedPaths(PrintPathArray &paths, const std::vector<zTsField::FaceTagSource> &sources,
       const PrintSynSetting &settings, std::string &status,
       const zObjMeshArray *charts2D = nullptr, const zObjMeshArray *sections3D = nullptr);
+  // Independent layer preparation may run in parallel; the global per-tag
+  // budget reduction retains layer/source order. The legacy overload is serial.
+  static bool resampleFaceTaggedPaths(PrintPathArray &paths, const std::vector<zTsField::FaceTagSource> &sources,
+      const PrintSynSetting &settings, std::string &status,
+      const zObjMeshArray *charts2D, const zObjMeshArray *sections3D, bool useParallel);
 
   /*! \brief Step 1: resamples (corner-preserving), glitch-filters and
-   * orients every 2D print path in place. Carries featureFlags and preserves
-   * distinct feature targets regardless of nearby samples/closing distance.
+   * orients every 2D print path in place. Re-detects geometric features and
+   * merges consecutive targets closer than 0.01 mm.
    * Bad layers: a first path that was
    * closed before and is open after. */
   static bool resamplePrintPaths(PrintPathArray &ioPaths2D,
@@ -176,7 +186,8 @@ public:
   static bool linkPrintPaths(const PrintPathArray &paths3D,
                              PrintPath &outCombined, std::string &outStatus);
 
-  // Second sampling pass in 3D, after reconstructed corners are mapped. Keeps
+  // Explicit standalone 3D resampling utility; not called by computePipeline.
+  // After reconstructed corners are mapped, keeps
   // exact mandatory targets; ordinary points have half-spacing clearance from
   // adjacent features/endpoints and are placed on the current section. Updates
   // the matching 2D targets/attributes using the same surface barycentrics.

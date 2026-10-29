@@ -61,8 +61,9 @@ void relaxation() {
       for(int id:{a,b}){const auto &p=m.Positions[id];const double side=(std::min)({std::abs(double(p.x)),std::abs(double(p.x)-4),std::abs(double(p.y)),std::abs(double(p.y)-4)});
         require(side<1e-6,"A boundary target left the reference box");}}
   }
-  // Retain mandatory feature coordinates/identity through the actual PrintSyn
-  // pipeline on the relaxed section, including smooth-normal interpolation.
+  // Retain geometric corner coordinates through the actual PrintSyn pipeline
+  // on the relaxed section, including smooth-normal interpolation. Historical
+  // intersection metadata is deliberately cleared by angle re-detection.
   auto &middle=layers[2];zObjMesh chart,surface;zIntArray counts(middle.Triangles.size(),3),connects;
   for(const auto &t:middle.Triangles)connects.insert(connects.end(),t.begin(),t.end());
   auto flat=middle.Positions;for(auto &p:flat)p.z=0;
@@ -75,7 +76,7 @@ void relaxation() {
   require(zPrintSyn::computePipeline(charts,surfaces,nullptr,zPrintSyn::SeamMapping::WorldNearest,ps,paths2D,projected,combined,error,false,&heights,&n),error);
   zPointArray points;zFnGraph(combined.graph).getVertexPositions(points);
   for(int f=0;f<4;++f){bool found=false;for(size_t i=0;i<points.size();++i)if(norm(points[i],middle.Positions[ids[f]])<3e-6){
-      found=true;require((combined.featureFlags[i]&path.featureFlags[f])==path.featureFlags[f],"Lost angle/intersection identity");
+      found=true;require(combined.featureFlags[i]==PrintPath::AngleFeature,"Geometric corner flags were not refreshed");
       require(norm(combined.normals[i],middle.Normals[ids[f]])<3e-6,"Projection replaced recovered normal with a face normal");}
     require(found,"Resampling or 3D projection lost a mandatory feature target");}
   const auto rejectNormals=[&](){require(!zPrintSyn::projectPrintPaths(paths2D,charts,surfaces,nullptr,projected,error,nullptr,false,&heights,&n),

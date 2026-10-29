@@ -24,6 +24,8 @@
 #endif
 
 #include <zspace/zToolsets/zToolsetsExport.h>
+#include <zspace/zToolsets/fabrication/slicing/utils/SlicingTiming.h>
+#include <memory>
 
 #include <zspace/interface.h>
 #include <zspace/io.h>
@@ -200,8 +202,9 @@ struct PrintPath {
   zIntArray faceTags, edgeFaceTags;
   struct FaceTagSegment { int tag=0; zIntArray vertices; };
   std::vector<FaceTagSegment> faceTagSegments;
-  // Optional per-vertex bit mask. Empty means no recorded features. Once
-  // populated, stays parallel to graph vertices through all PrintSyn stages.
+  // Optional per-vertex bit mask, parallel to graph vertices when populated.
+  // Reconstruction/sampling refreshes angle flags from current geometry;
+  // mapping carries them as metadata. Feature selection re-detects angles.
   zIntArray featureFlags;
 };
 
@@ -216,8 +219,9 @@ typedef std::vector<std::vector<PrintPath>> PrintPathArray;
 
 namespace zTsUtils {
 
-// Loft one centered width x height rectangle per print vertex. Height follows
-// the unit print normal; width is perpendicular to it and the local tangent.
+// Loft one rectangle per print vertex: centered width and height from 0 to h.
+// Sections are normal to the neighbor chord, with the print normal projected
+// into the section's height axis. Chords keep a consistent forward direction.
 // Each graph component/layer is independent; open paths receive end caps.
 // Zero dimensions are retained (collapsed sections); no artificial thickness.
 // Failure clears outMesh and reports the layer/path through outError.
@@ -567,9 +571,25 @@ struct FaceTagSource {
   std::vector<FieldSegment> bracing;
 };
 
+// Immutable snapshot of the source's prepared distance fields and original
+// edge identities. Safe for concurrent reads; construct again after changing
+// source geometry/settings. Copies share the same prepared storage.
+class ZSPACE_TOOLSETS FaceTagQuery {
+public:
+  FaceTagQuery() = default;
+  explicit FaceTagQuery(const FaceTagSource &source);
+  bool valid() const;
+  int label(const zPoint &point) const;
+  bool query(const zPointArray &points, zIntArray &tags) const;
+private:
+  struct Impl;
+  std::shared_ptr<const Impl> _impl;
+};
+
 // Classify using the same boundary/slot distance fields as path generation.
 // Inserts exact category-transition anchors and records directed edge labels.
 ZSPACE_TOOLSETS bool labelFaceTagSegments(PrintPath &path, const FaceTagSource &source, bool splitTransitions = true);
+ZSPACE_TOOLSETS bool labelFaceTagSegments(PrintPath &path, const FaceTagQuery &query, bool splitTransitions = true);
 ZSPACE_TOOLSETS bool queryFaceTags(const FaceTagSource &source, const zPointArray &points, zIntArray &tags);
 
 /*! \brief BoundaryWidth entry of width group id: the last entry for ids

@@ -176,6 +176,7 @@ ZSPACE_INLINE std::vector<double> HarmonicSlicer::capDirichletValues() const {
 // (u,v) left as NaN placeholders until computeVolumetricParameterization()
 // fills them in.
 ZSPACE_INLINE bool HarmonicSlicer::computeHarmonicField() {
+  zTsUtils::ScopedSlicingTiming methodTiming("HarmonicSlicer.computeHarmonicField");
   const bool success = computeHarmonicFieldImpl();
   if (success) zTsUtils::printSuccess("[HarmonicSlicer::computeHarmonicField] Success");
   else zTsUtils::printError("[HarmonicSlicer::computeHarmonicField] Failed");

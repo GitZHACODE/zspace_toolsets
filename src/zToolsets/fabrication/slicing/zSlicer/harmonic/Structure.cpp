@@ -561,6 +561,7 @@ ZSPACE_INLINE void HarmonicSlicer::clearStructure() {
 }
 
 ZSPACE_INLINE bool HarmonicSlicer::computeBasicStructure(bool useParallel) {
+  zTsUtils::ScopedSlicingTiming methodTiming("HarmonicSlicer.computeBasicStructure");
   const bool success = computeBasicStructureImpl(useParallel);
   if (success) zTsUtils::printSuccess("[HarmonicSlicer::computeBasicStructure] Success");
   else zTsUtils::printError("[HarmonicSlicer::computeBasicStructure] Failed");

@@ -610,6 +610,7 @@ ZSPACE_INLINE bool parameterizeGraph(const zObjGraph &inGraph, zObjMesh &inMesh,
                                      const zPointArray *positionsOverride,
                                      bool allowNearest, std::string *outError,
                                      const zPointArray *diagnosticTargetPositions) {
+  zTsUtils::ScopedSlicingTiming methodTiming("SlicingMap.parameterizeGraph", true);
   if (outError) outError->clear();
   const auto fail = [&](const std::string &reason) {
     if (outError) *outError = reason;
@@ -851,6 +852,7 @@ ZSPACE_INLINE bool realizeParameterGraph(const ParameterGraph &inParams,
                                          const zFloatArray *vertexHeights,
                                          zFloatArray *outHeights,
                                          const zVectorArray *vertexNormals) {
+  zTsUtils::ScopedSlicingTiming methodTiming("SlicingMap.realizeParameterGraph", true);
   if (inParams.empty())
     return false;
 
@@ -936,6 +938,7 @@ ZSPACE_INLINE bool remapGraph(zObjGraph &graph, zObjMesh &inMesh2D,
                               const zFloatArray *vertexHeights,
                               zFloatArray *mappedHeights, std::string *outError,
                               const zVectorArray *vertexNormals) {
+  zTsUtils::ScopedSlicingTiming methodTiming("SlicingMap.remapGraph", true);
   if (outError) outError->clear();
   ParameterGraph tempParams;
   zIntArray sourceConnects, sourceCounts, targetConnects, targetCounts;
@@ -966,6 +969,7 @@ ZSPACE_INLINE bool mapPointToMeshes(const zPoint &point, zObjMesh &fromMesh,
                                     zPointArray &outPoints,
                                     std::vector<char> &outValid,
                                     double *outDistance, bool useParallel) {
+  zTsUtils::ScopedSlicingTiming methodTiming("SlicingMap.mapPointToMeshes", true);
   outPoints.assign(toMeshes.size(), zPoint());
   outValid.assign(toMeshes.size(), 0);
 
@@ -1019,6 +1023,7 @@ ZSPACE_INLINE bool mapPointToMeshes(const zPoint &point, zObjMesh &fromMesh,
 ZSPACE_INLINE bool mapPoint(const zPoint &point, zObjMesh &fromMesh,
                             zObjMesh &toMesh, zPoint &outPoint,
                             double *outDistance) {
+  zTsUtils::ScopedSlicingTiming methodTiming("SlicingMap.mapPoint", true);
   zPointArray points;
   std::vector<char> valid;
   if (!mapPointToMeshes(point, fromMesh, {&toMesh}, points, valid,

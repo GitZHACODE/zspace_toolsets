@@ -4,11 +4,43 @@
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <thread>
 
 using namespace zSpace;
 namespace {
 void require(bool value, const std::string &message) {
   if (!value) throw std::runtime_error(message);
+}
+void timingChecks() {
+  using namespace zTsUtils;
+  setSlicingTimingsEnabled(false);
+  clearSlicingTimings();
+  { ScopedSlicingTiming disabled("disabled"); }
+  require(getSlicingTimings().empty(), "Disabled instrumentation recorded a sample");
+  setSlicingTimingsEnabled(true);
+  {
+    ScopedSlicingTiming stale("stale");
+    clearSlicingTimings();
+  }
+  require(getSlicingTimings().empty(), "A cleared timing leaked into the next run");
+  std::vector<std::thread> workers;
+  for (int worker = 0; worker < 4; ++worker) workers.emplace_back([] {
+    for (int i = 0; i < 100; ++i) { ScopedSlicingTiming timed("parallel", true); }
+  });
+  for (auto &worker : workers) worker.join();
+  try { ScopedSlicingTiming failed("exception"); throw std::runtime_error("expected"); }
+  catch (const std::runtime_error &) {}
+  setSlicingTimingsEnabled(false);
+  const auto rows = getSlicingTimings();
+  const auto parallel = std::find_if(rows.begin(), rows.end(), [](const auto &row) { return row.name == "parallel"; });
+  const auto failed = std::find_if(rows.begin(), rows.end(), [](const auto &row) { return row.name == "exception"; });
+  require(parallel != rows.end() && parallel->calls == 400 && parallel->workerAggregate,
+      "Parallel timing lost samples or its aggregate marker");
+  require(parallel->totalMilliseconds >= parallel->maxMilliseconds &&
+      parallel->maxMilliseconds >= 0 && std::isfinite(parallel->totalMilliseconds),
+      "Invalid parallel timing statistics");
+  require(failed != rows.end() && failed->calls == 1, "Exception exit lost the method timing");
+  clearSlicingTimings();
 }
 zPointArray positions(const PrintPath &path) {
   zPointArray p;
@@ -71,20 +103,51 @@ void surfaceContourOutput(){
   zObjMeshArray charts{chart()},sections{chart()};PrintSynSetting settings;settings.ResampleLength=.5f;settings.FeatureAngleTol=0;settings.SeamOffset=0;settings.SeamSize=0;
   PrintPathArray first{{raw}},second=first,a,b,hidden;PrintPath ca,cb;std::string sa,sb;
   require(zPrintSyn::computePipeline(charts,sections,nullptr,zPrintSyn::SeamMapping::WorldNearest,settings,first,a,ca,sa,false),sa);
+  zTsUtils::clearSlicingTimings(); zTsUtils::setSlicingTimingsEnabled(true);
   require(zPrintSyn::computePipeline(charts,sections,nullptr,zPrintSyn::SeamMapping::WorldNearest,settings,second,b,cb,sb,false,nullptr,nullptr,&hidden),sb);
+  zTsUtils::setSlicingTimingsEnabled(false);
+  const auto timingRows=zTsUtils::getSlicingTimings();
+  for(const char *name:{"PrintSyn.computePipeline","PrintSyn.resamplePrintPaths",
+      "PrintSyn.reconstructCorners","PrintSyn.alignStartPoints","PrintSyn.projectPrintPaths",
+      "PrintSyn.linkPrintPaths"})
+    require(std::any_of(timingRows.begin(),timingRows.end(),[&](const auto &row){return row.name==name&&row.calls>0;}),
+        std::string("Missing postprocessing timing: ")+name);
+  require(std::none_of(timingRows.begin(),timingRows.end(),[](const auto &row){
+      return row.name=="PrintSyn.resamplePrintPaths3D" || row.name=="PrintSyn.resampleMapped";}),
+      "Production pipeline still runs a second resampling pass");
+  zTsUtils::clearSlicingTimings();
   const auto compare=[](const PrintPath &a,const PrintPath &b){const auto p=positions(a),q=positions(b);require(p.size()==q.size(),"Hidden output changed target count");
     for(size_t i=0;i<p.size();++i)require(zTsUtils::vecDistSq(p[i],q[i])==0,"Hidden output changed target geometry");
     require(a.featureFlags==b.featureFlags&&a.heights==b.heights&&a.widths==b.widths&&a.trackIds==b.trackIds,"Hidden output changed attributes/features");
     require(a.normals.size()==b.normals.size(),"Hidden output changed normal count");for(size_t i=0;i<a.normals.size();++i)require(zTsUtils::vecDistSq(a.normals[i],b.normals[i])==0,"Hidden output changed normals");
     zIntArray ea,eb;zFnGraph(const_cast<zObjGraph&>(a.graph)).getEdgeData(ea);zFnGraph(const_cast<zObjGraph&>(b.graph)).getEdgeData(eb);require(ea==eb,"Hidden output changed connectivity");};
   compare(ca,cb);compare(first[0][0],second[0][0]);compare(a[0][0],b[0][0]);
-  // The observer owns the actual processed source immediately before final
-  // sampling. Restored angular preprocessing intentionally replaces raw points.
+  // The observer owns the final processed 2D targets; mapping must not
+  // redistribute them. Angular preprocessing intentionally replaces raw points.
   PrintPathArray expected{{raw}};std::vector<int> bad;
   require(zPrintSyn::resamplePrintPaths(expected,settings,sa,&bad,false)&&bad.empty(),sa);
   require(zPrintSyn::alignStartPoints(expected,charts,sections,settings.SeamOffset,settings.SeamSize,sa,&bad,false)&&bad.empty(),sa);
   require(hidden.size()==1&&hidden[0].size()==1,"Hidden output lost the processed curve");
   compare(hidden[0][0],expected[0][0]);
+  compare(hidden[0][0],second[0][0]);
+  // Stretching the surface changes 3D lengths. Final targets must remain the
+  // mapped 2D samples, rather than being redistributed by those new lengths.
+  zObjMesh stretched=chart();zFnMesh stretchedFn(stretched);
+  auto *world=stretchedFn.getRawVertexPositions();
+  for(int i=0;i<stretchedFn.numVertices();++i){world[i].x*=3;world[i].y*=2;}
+  PrintPathArray flat{{raw}},mapped,observed;PrintPath combined;
+  require(zPrintSyn::computePipeline(charts,zObjMeshArray{stretched},nullptr,
+      zPrintSyn::SeamMapping::WorldNearest,settings,flat,mapped,combined,sa,false,
+      nullptr,nullptr,&observed),sa);
+  require(observed.size()==1&&observed[0].size()==1,"Stretched mapping lost sampled targets");
+  compare(observed[0][0],flat[0][0]);
+  const auto chartPoints=positions(flat[0][0]),worldPoints=positions(mapped[0][0]);
+  require(chartPoints.size()==worldPoints.size() &&
+      flat[0][0].featureFlags==mapped[0][0].featureFlags,
+      "3D mapping changed sampled target count or feature identities");
+  for(size_t i=0;i<chartPoints.size();++i)
+    require(zTsUtils::vecDistSq(worldPoints[i],zPoint(3*chartPoints[i].x,2*chartPoints[i].y,0))<1e-10,
+        "Final target moved away from its sampled 2D surface mapping");
   raw.featureFlags.pop_back();first={{raw}};second=first;
   require(!zPrintSyn::computePipeline(charts,sections,nullptr,zPrintSyn::SeamMapping::WorldNearest,settings,first,a,ca,sa,false),"Old pipeline accepted invalid feature data");
   require(!zPrintSyn::computePipeline(charts,sections,nullptr,zPrintSyn::SeamMapping::WorldNearest,settings,second,b,cb,sb,false,nullptr,nullptr,&hidden),"Observed pipeline accepted invalid feature data");
@@ -103,49 +166,47 @@ void resampling() {
       sampled.heights[id] == corner.heights[1] && sampled.trackIds[id] == corner.trackIds[1],
       "Nearby regular sample replaced a corner's attributes");
 
-  // Features separated by <0.01 mm and <0.1 mm across closure are distinct.
-  for (bool clockwise : {false, true}) {
-    zPointArray p{{0,0,0},{1,0,0},{1,0.005,0},{0,0.005,0}};
-    if (clockwise) std::reverse(p.begin(), p.end());
-    auto result = resample(path(p, true), 0.2f, 91);
-    for (const auto &point : p)
-      require(result.featureFlags[findPoint(result, point)] & PrintPath::AngleFeature,
-          "Thin-loop or closure feature was removed/reordered incorrectly");
-    require(zTsUtils::isClosedGraph(result.graph), "Closed loop was opened");
-  }
-  // Short edges cannot disable angle detection; fine sampling must remain fine.
-  zPointArray tiny{{0,0,0},{0.0004,0,0},{0.0004,0.0003,0},{0,0.0003,0}};
-  sampled = resample(path(tiny, true), 0.0001f, 91);
-  for (const auto &point : tiny)
-    require(sampled.featureFlags[findPoint(sampled, point, 1e-10)] & PrintPath::AngleFeature,
-        "Short feature-to-feature edge lost a corner");
-  require(positions(sampled).size() > 4, "Fine regular samples were filtered away");
+  // A near corner pair becomes one target; a tiny whole path cannot retain
+  // valid connectivity under a 0.01 mm weld.
+  sampled=resample(path({{0,0,0},{1,0,0},{1,.005f,0},{2,1,0}}),.2f,150);
+  const auto welded=positions(sampled);zIntArray weldedEdges;zFnGraph(sampled.graph).getEdgeData(weldedEdges);
+  for(size_t e=0;e<weldedEdges.size();e+=2)require(zTsUtils::vecDistSq(welded[weldedEdges[e]],welded[weldedEdges[e+1]])>=.0001,
+      "Nearby targets did not merge at 0.01 mm");
+  PrintPathArray tiny{{path({{0,0,0},{.0004f,0,0},{.0004f,.0003f,0},{0,.0003f,0}},true)}};
+  PrintSynSetting tinySettings;tinySettings.ResampleLength=.0001f;tinySettings.FeatureAngleTol=91;std::string tinyStatus;
+  require(!zPrintSyn::resamplePrintPaths(tiny,tinySettings,tinyStatus,nullptr,false),"A sub-tolerance loop retained invalid targets");
 
-  // Consecutive coincident feature vertices coalesce, combining their masks.
+  // Historical metadata does not turn a straight point into an anchor.
   auto coincident = path({{0,0,0},{1,0,0},{1,0,0},{2,0,0}});
   coincident.featureFlags = {0, PrintPath::AngleFeature, PrintPath::IntersectionFeature, 0};
   sampled = resample(coincident, 0.3f, 0);
-  require(sampled.featureFlags[findPoint(sampled, {1,0,0})] ==
-      (PrintPath::AngleFeature | PrintPath::IntersectionFeature), "Coincident feature flags lost");
+  require(zPrintSyn::featureVertexIds(sampled,0).empty()&&
+      std::none_of(sampled.featureFlags.begin(),sampled.featureFlags.end(),[](int f){return f!=0;}),
+      "Historical feature masks survived geometry re-detection");
 
   // Reconstruction intersects the horizontal/vertical supports at (2,0).
   auto bevel = path({{0,0,0},{1,0,0},{1.8,0,0},{2,0.2,0},{2,1,0},{2,2,0}});
   require(zPrintSyn::reconstructCorners(bevel, 150), "Corner reconstruction failed");
   id = findPoint(bevel, {2,0,0});
-  require(bevel.featureFlags[id] & PrintPath::IntersectionFeature, "Intersection not marked");
-  const float cornerWidth = bevel.widths[id], cornerHeight = bevel.heights[id];
-  // A lower threshold deliberately does not re-detect this 90-degree corner.
+  require(bevel.featureFlags[id] & PrintPath::AngleFeature, "Reconstructed corner not re-detected");
+  require(zPrintSyn::featureVertexIds(bevel,80).empty(),"Feature API used an old intersection mask");
+  // A lower threshold deliberately stops preserving this 90-degree corner.
   sampled = resample(bevel, 0.3f, 80);
-  id = findPoint(sampled, {2,0,0});
-  require(sampled.featureFlags[id] & PrintPath::IntersectionFeature, "Intersection required re-detection");
-  require(sampled.widths[id] == cornerWidth && sampled.heights[id] == cornerHeight,
-      "Reconstructed intersection attributes changed");
-  sampled = resample(sampled, 0.23f, 150);
-  require(sampled.featureFlags[findPoint(sampled, {2,0,0})] & PrintPath::IntersectionFeature,
-      "Repeated reconstruction moved an existing intersection anchor");
-  // Endpoint survival even when spacing exceeds the whole open path length.
-  sampled = resample(path({{0,0,0},{0.005,0,0}}), 1, 90);
-  require(positions(sampled).size() == 2, "Short open path lost its endpoint");
+  require(std::none_of(sampled.featureFlags.begin(),sampled.featureFlags.end(),[](int f){return f&PrintPath::IntersectionFeature;}),
+      "Resampling kept historical intersection identities");
+  // Valid endpoints still survive spacing larger than the whole path.
+  sampled = resample(path({{0,0,0},{0.02f,0,0}}), 1, 90);
+  require(positions(sampled).size() == 2, "Open path lost a separated endpoint");
+  for(bool reverse:{false,true}){
+    zPointArray points{{.005f,0,0},{1,0,0},{1,1,0},{0,1,0},{0,0,0}};
+    if(reverse){std::reverse(points.begin(),points.end());
+      std::rotate(points.begin(),points.end()-1,points.end());}
+    auto input=path(points,true);
+    size_t cornerId=findPoint(input,{0,0,0});input.heights[cornerId]=17;
+    sampled=resample(input,.2f,91);
+    require(sampled.heights[findPoint(sampled,{0,0,0})]==17,
+      "An arbitrary seam start replaced the nearby geometric corner");
+  }
 
   PrintPathArray invalid{{corner}};
   invalid[0][0].featureFlags = {1};
@@ -218,11 +279,13 @@ void mapping() {
   require(zTsUtils::graphPolylines(combined.graph, components) && components.size() == 2 &&
       combined.featureFlags.size() == source.size()*2, "Feature propagation linked disjoint curves");
 
-  // Both seam mapping strategies must preserve features outside explicit gaps.
+  // Both seam mapping strategies preserve current geometric features outside
+  // explicit gaps. The threshold must select these corners; metadata alone
+  // no longer forces them to remain anchors.
   for (auto strategy : {zPrintSyn::SeamMapping::SharedTopology, zPrintSyn::SeamMapping::WorldNearest}) {
     PrintPathArray paths{{input},{input}};
     PrintSynSetting settings;
-    settings.ResampleLength = 0.17f; settings.FeatureAngleTol = 0;
+    settings.ResampleLength = 0.17f; settings.FeatureAngleTol = 91;
     settings.SeamOffset = 0.11f;
     require(zPrintSyn::computePipeline(charts, sections, nullptr, strategy, settings,
         paths, mapped, combined, status, false, &heights), status);
@@ -328,7 +391,7 @@ void slicerIntegration(zTsSlicerMode mode) {
 }
 int main() {
   try {
-    surfaceContourOutput(); resampling(); mapping(); slicerIntegration(zTsSlicerMode::Topology);
+    timingChecks(); surfaceContourOutput(); resampling(); mapping(); slicerIntegration(zTsSlicerMode::Topology);
 #ifdef ZSPACE_TOOLSETS_WITH_TETGEN
     slicerIntegration(zTsSlicerMode::Harmonic);
 #endif

@@ -37,6 +37,7 @@ struct HarmonicSlicer::ContourData {
 };
 
 ZSPACE_INLINE bool HarmonicSlicer::computeVertexLayerHeights(int numLayers, zFloatArray &heights) const {
+  zTsUtils::ScopedSlicingTiming methodTiming("HarmonicSlicer.computeVertexLayerHeights");
   heights.clear();
   if (numLayers < 2 || !_Tet.FieldValid ||
       _Tet.VolumeFieldGradients.size() != _Tet.Volumes.size()) return false;
@@ -535,6 +536,7 @@ ZSPACE_INLINE void HarmonicSlicer::createIsoBoundaries(const zPointArray &positi
 }
 
 ZSPACE_INLINE bool HarmonicSlicer::computeContours(bool useParallel) {
+  zTsUtils::ScopedSlicingTiming methodTiming("HarmonicSlicer.computeContours");
   clearContours();
   if (std::find(_Tet.UVWValid.begin(), _Tet.UVWValid.end(), true) == _Tet.UVWValid.end()) {
     _Status = "computeContours failed: needs computeVolumetricParameterization() first.";

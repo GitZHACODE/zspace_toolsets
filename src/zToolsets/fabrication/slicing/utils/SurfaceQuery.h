@@ -37,7 +37,9 @@ private:
       std::nth_element(order_.begin()+begin,order_.begin()+middle,order_.begin()+end,[&](int a,int b){return boxes_[a].Lo[axis]+boxes_[a].Hi[axis]<boxes_[b].Lo[axis]+boxes_[b].Hi[axis];});
       const int left=build(begin,middle),right=build(middle,end);nodes_[id].Left=left;nodes_[id].Right=right;}return id;}
 public:
-  explicit SurfaceQuery(zObjMesh &mesh){zPointArray p;zIntArray c,n;zFnMesh fn(mesh);fn.getVertexPositions(p);fn.getPolygonData(c,n);size_t offset=0;
+  explicit SurfaceQuery(zObjMesh &mesh){
+    zTsUtils::ScopedSlicingTiming methodTiming("SurfaceQuery.build", true);
+    zPointArray p;zIntArray c,n;zFnMesh fn(mesh);fn.getVertexPositions(p);fn.getPolygonData(c,n);size_t offset=0;
     for(int count:n){for(int j=1;j+1<count;++j){Triangle t;t.Ids={c[offset],c[offset+j],c[offset+j+1]};Box box;
         for(int k=0;k<3;++k){t.P[k]=zTsUtils::toEigenVec(p.at(t.Ids[k]));box.add(t.P[k]);}
         t.Normal=(t.P[1]-t.P[0]).cross(t.P[2]-t.P[0]);if(t.Normal.squaredNorm()==0)continue;t.Normal.normalize();triangles_.push_back(t);boxes_.push_back(box);}

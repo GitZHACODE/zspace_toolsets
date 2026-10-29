@@ -224,6 +224,9 @@ public:
   // One height per vertex: relaxed geometric normal spacing, or the original
   // gradient-based estimate when iso relaxation is disabled.
   const std::vector<zFloatArray> &getVertexLayerHeights() const { return o_VertexLayerHeights; }
+  // Projection normals: relaxed interior normals, plus inward bottom-cap
+  // normals for deposition toward increasing layers. Solver/source cap winding
+  // remains outward; relaxationLayers() does not consume this override table.
   const std::vector<zVectorArray> &getVertexLayerNormals() const { return o_VertexLayerNormals; }
   const zTsRelax::HeightReport &getPrintHeightOptimizationReport() const { return _PrintHeightOptimizationReport; }
   const std::vector<double> &getIsoValues() const { return _IsoValues; }

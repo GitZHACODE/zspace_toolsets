@@ -90,6 +90,7 @@ void detectFeatureAngles(const zPointArray &positions,
 // widths/heights/normals along.
 bool resampleSinglePath(PrintPath &ioPath, float resampleLength,
                         float featureAngleTol) {
+  zTsUtils::ScopedSlicingTiming methodTiming("PrintSyn.resampleSinglePath", true);
   zFnGraph fnGraph(ioPath.graph);
   const int N = fnGraph.numVertices();
   if (!std::isfinite(resampleLength) || resampleLength < zTsField::MinPhysicalParameter) {
@@ -122,7 +123,6 @@ bool resampleSinglePath(PrintPath &ioPath, float resampleLength,
   for (int i = 0; i < N; ++i) {
     // Open endpoints are mandatory, but are not angle features.
     if (!closed && (i == sequence.front() || i == sequence.back())) featureFlags[i] = 0;
-    if (!ioPath.featureFlags.empty()) featureFlags[i] |= ioPath.featureFlags[i];
   }
 
   const zFloatArray &weights = ioPath.widths;
@@ -152,15 +152,14 @@ bool resampleSinglePath(PrintPath &ioPath, float resampleLength,
 
   auto appendPoint = [&](const zPoint &p, float w, float h, const zVector &nrm,
                           float trk, int features, bool required) {
-    // A nearby ordinary sample yields to an exact feature/endpoint. Distinct
-    // required points never weld, however short the edge between them is.
-    const double clearance = (std::min)(0.01, double(sampleLength) * 0.1);
-    while (required && !outPoints.empty() && !outRequired.back() &&
+    // Keep the historical 0.01 mm weld, preferring an exact geometric corner
+    // or endpoint over an ordinary target. Metadata never creates anchors.
+    const double clearance = 0.01;
+    while (required && !outPoints.empty() &&
+           (!outRequired.back() || (features && !outFeatures.back())) &&
            vecDistSq(p, outPoints.back()) < clearance * clearance) popPoint();
     if (!outPoints.empty()) {
-      if (vecDistSq(p, outPoints.back()) == 0.0) {
-        outFeatures.back() |= features;
-        outRequired.back() |= required;
+      if (vecDistSq(p, outPoints.back()) < clearance * clearance) {
         return;
       }
     }
@@ -251,13 +250,22 @@ bool resampleSinglePath(PrintPath &ioPath, float resampleLength,
     }
   }
 
-  // Ordinary closing samples yield to the required start, including tiny
-  // numerical residuals after a whole number of sample intervals. Required
-  // closing features never participate in the old 0.1 mm closure weld.
-  const double closingClearance = (std::min)(0.01, double(sampleLength) * 0.1);
-  while (closed && outPoints.size() > 1 && !outRequired.back() &&
-         vecDistSq(outPoints.front(), outPoints.back()) < closingClearance * closingClearance)
+  // The same weld applies across the seam; the former 0.1 mm closing weld
+  // would remove distinct corners that exceed the requested 0.01 mm merge.
+  const double closingClearance = 0.01;
+  while (closed && outPoints.size() > 1 &&
+         vecDistSq(outPoints.front(), outPoints.back()) < closingClearance * closingClearance) {
+    // A graph's arbitrary start can be an ordinary point just after a corner.
+    // Preserve the real closing corner and all its attributes in that case.
+    if(outFeatures.back()&&!outFeatures.front()) {
+      outPoints.front()=outPoints.back();outWeights.front()=outWeights.back();
+      if(hasHeights)outHeights.front()=outHeights.back();
+      if(hasNormals)outNormals.front()=outNormals.back();
+      if(hasTrackIds)outTrackIds.front()=outTrackIds.back();
+      outFeatures.front()=outFeatures.back();outRequired.front()=true;
+    }
     popPoint();
+  }
   if (closed && outPoints.size() > 1 && vecDistSq(outPoints.front(), outPoints.back()) == 0.0) {
     outFeatures.front() |= outFeatures.back();
     popPoint();
@@ -290,11 +298,15 @@ bool resampleSinglePath(PrintPath &ioPath, float resampleLength,
     ioPath.normals = outNormals;
   if (hasTrackIds)
     ioPath.trackIds = outTrackIds;
+  ioPath.featureFlags.assign(outPoints.size(),0);
+  for(int id:zPrintSyn::cornerVertexIds(ioPath,featureAngleTol))
+    ioPath.featureFlags[id]=PrintPath::AngleFeature;
   return true;
 }
 
 // Smooths localized width glitches (isolated spikes/dips) in ioPath.widths.
 void filterGlitches(PrintPath &ioPath) {
+  zTsUtils::ScopedSlicingTiming methodTiming("PrintSyn.filterGlitches", true);
   const bool closed = isClosedGraph(ioPath.graph);
   zFloatArray &widths = ioPath.widths;
   const int n = static_cast<int>(widths.size());
@@ -359,6 +371,7 @@ void reversePrintPath(PrintPath &ioPath) {
 // (extraction already produces at most one ring per layer, already
 // inner-before-outer ordered).
 bool orientLayer(std::vector<PrintPath> &ringPaths, bool ccw) {
+  zTsUtils::ScopedSlicingTiming methodTiming("PrintSyn.orientLayer", true);
   if (ringPaths.empty())
     return false;
 
@@ -527,6 +540,7 @@ std::string layerList(const std::vector<int> &layers, size_t maxShown = 12) {
 bool insertAndRotateToStart(PrintPath &ioPath, double s,
                             std::string *outReason = nullptr,
                             double weldEps = 1e-3) {
+  zTsUtils::ScopedSlicingTiming methodTiming("PrintSyn.insertAndRotateToStart", true);
   zFnGraph fnGraph(ioPath.graph);
   zPointArray positions;
   fnGraph.getVertexPositions(positions);
@@ -682,6 +696,7 @@ bool insertAndRotateToStart(PrintPath &ioPath, double s,
 // target
 bool nearestInnerArcPos(const PrintPath &path, const zPoint &target,
                         double &outArcPos) {
+  zTsUtils::ScopedSlicingTiming methodTiming("PrintSyn.nearestInnerArcPos", true);
   zFnGraph fnGraph(const_cast<zObjGraph &>(path.graph));
   zPointArray positions;
   fnGraph.getVertexPositions(positions);
@@ -759,6 +774,7 @@ void openLoopAtStart(PrintPath &ioPath) {
 // Cuts the closed ring open right before its (already finalized) start
 // point
 void cutGapBeforeStart(PrintPath &ioPath, double seamSize) {
+  zTsUtils::ScopedSlicingTiming methodTiming("PrintSyn.cutGapBeforeStart", true);
   if (seamSize <= 1e-6) {
     openLoopAtStart(ioPath);
     return;
@@ -927,6 +943,7 @@ ZSPACE_INLINE zIntArray zPrintSyn::cornerVertexIds(const PrintPath &path, float 
 }
 
 ZSPACE_INLINE bool zPrintSyn::reconstructCorners(PrintPath &path, float angleThreshold) {
+  zTsUtils::ScopedSlicingTiming methodTiming("PrintSyn.reconstructCorners", true);
   std::vector<GraphPolyline> curves;
   if (!graphPolylines(path.graph, curves) || curves.size() != 1) return false;
   zPointArray points;
@@ -946,22 +963,13 @@ ZSPACE_INLINE bool zPrintSyn::reconstructCorners(PrintPath &path, float angleThr
   std::vector<int> flags;
   detectFeatureAngles(points, sequence, angleThreshold, closed, flags);
   if (!closed) flags[sequence.front()] = flags[sequence.back()] = 0;
-  const zIntArray previousFeatures = path.featureFlags;
-  zIntArray recorded = previousFeatures;
-  if (recorded.empty()) recorded.assign(points.size(), 0);
-  for (int id = 0; id < n; ++id) {
-    recorded[id] |= flags[id];
-    // Features already reconstructed/recorded are anchors. A subsequent
-    // resampling call must not reconstruct them into a different corner.
-    if (!previousFeatures.empty() && previousFeatures[id]) flags[id] = 0;
-  }
+  zIntArray recorded = flags;
   path.featureFlags = recorded;
   if (n < 5) return true;
   auto merged = flags;
   for (int i = 0; i < n; ++i) {
     if (!closed && (i == 0 || i == n-1)) continue;
-    if (flags[sequence[(i+n-1)%n]] && flags[sequence[(i+1)%n]] &&
-        (previousFeatures.empty() || !previousFeatures[sequence[i]]))
+    if (flags[sequence[(i+n-1)%n]] && flags[sequence[(i+1)%n]])
       merged[sequence[i]] = 1;
   }
   if (closed) {
@@ -1038,17 +1046,18 @@ ZSPACE_INLINE bool zPrintSyn::reconstructCorners(PrintPath &path, float angleThr
   for (int i = 1; i < static_cast<int>(output.size()); ++i) { edges.push_back(i-1); edges.push_back(i); }
   if (closed) { edges.push_back(static_cast<int>(output.size())-1); edges.push_back(0); }
   zFnGraph(updated.graph).create(output, edges);
+  // Intersections are geometry now. Refresh their angle classification rather
+  // than keeping a historical mask that could outlive the actual corner.
+  updated.featureFlags.assign(output.size(), 0);
+  for (int id : cornerVertexIds(updated, angleThreshold))
+    updated.featureFlags[id] = PrintPath::AngleFeature;
   path = std::move(updated);
   return true;
 }
 
 
 ZSPACE_INLINE zIntArray zPrintSyn::featureVertexIds(const PrintPath &path,float fallbackAngleThreshold) {
-  if(path.featureFlags.empty())return cornerVertexIds(path,fallbackAngleThreshold);
-  if(path.featureFlags.size()!=size_t(zFnGraph(const_cast<zObjGraph&>(path.graph)).numVertices()))return {};
-  zIntArray ids;for(size_t i=0;i<path.featureFlags.size();++i)
-    if(path.featureFlags[i]&(PrintPath::AngleFeature|PrintPath::IntersectionFeature))ids.push_back(int(i));
-  return ids;
+  return cornerVertexIds(path,fallbackAngleThreshold);
 }
 
 
@@ -1063,6 +1072,7 @@ ZSPACE_INLINE bool zPrintSyn::alignStartPointsOnCharts(PrintPathArray &ioPaths,
                               double seamOffset, double seamSize,
                               std::string &outStatus,
                               std::vector<int> *outBadLayers, bool useParallel) {
+  zTsUtils::ScopedSlicingTiming methodTiming("PrintSyn.alignStartPointsOnCharts");
   if (outBadLayers)
     outBadLayers->clear();
   const int totalLayers = int(ioPaths.size());
@@ -1102,6 +1112,7 @@ ZSPACE_INLINE bool zPrintSyn::alignStartPointsWith(PrintPathArray &ioPaths,
                                                    double seamSize,
                                                    std::string &outStatus,
                                                    std::vector<int> *outBadLayers, bool useParallel) {
+  zTsUtils::ScopedSlicingTiming methodTiming("PrintSyn.alignStartPointsWith");
   if (outBadLayers)
     outBadLayers->clear();
   const int totalLayers = int(ioPaths.size());
@@ -1178,7 +1189,12 @@ ZSPACE_INLINE bool zPrintSyn::alignStartPointsWith(PrintPathArray &ioPaths,
   // 2. The seed point carried to every layer (mapSeed).
   zPointArray mappedSeeds;
   std::vector<char> mappedValid;
-  if (!mapSeed(seedLayer, seedPoint, mappedSeeds, mappedValid) ||
+  bool seedMapped;
+  {
+    zTsUtils::ScopedSlicingTiming seedTiming("PrintSyn.mapSeamSeed");
+    seedMapped = mapSeed(seedLayer, seedPoint, mappedSeeds, mappedValid);
+  }
+  if (!seedMapped ||
       int(mappedValid.size()) < totalLayers ||
       int(mappedSeeds.size()) < totalLayers) {
     outStatus = "failed: could not carry the seed point of layer " +
@@ -1318,6 +1334,7 @@ ZSPACE_INLINE bool zPrintSyn::resamplePrintPaths(PrintPathArray &ioPaths2D,
                                       const PrintSynSetting &settings,
                                       std::string &outStatus,
                                       std::vector<int> *outBadLayers, bool useParallel) {
+  zTsUtils::ScopedSlicingTiming methodTiming("PrintSyn.resamplePrintPaths");
   if (outBadLayers)
     outBadLayers->clear();
   if (!std::isfinite(settings.FeatureAngleTol) || settings.FeatureAngleTol < 0.0f ||
@@ -1397,6 +1414,7 @@ ZSPACE_INLINE bool zPrintSyn::alignStartPoints(PrintPathArray &ioPaths2D,
                                     double seamOffset, double seamSize,
                                     std::string &outStatus,
                                     std::vector<int> *outBadLayers, bool useParallel) {
+  zTsUtils::ScopedSlicingTiming methodTiming("PrintSyn.alignStartPoints");
   std::vector<const zObjMesh *> charts;
   charts.reserve(alignCharts2D.size());
   for (const zObjMesh &mesh : alignCharts2D)
@@ -1410,6 +1428,7 @@ ZSPACE_INLINE bool zPrintSyn::alignStartPoints(PrintPathArray &ioPaths2D,
                                     double seamOffset, double seamSize,
                                     std::string &outStatus,
                                     std::vector<int> *outBadLayers, bool useParallel) {
+  zTsUtils::ScopedSlicingTiming methodTiming("PrintSyn.alignStartPoints");
   const std::vector<const zObjMesh *> charts(ioPaths2D.size(), &alignChart2D);
   return alignStartPointsOnCharts(ioPaths2D, charts, seamOffset, seamSize,
                                   outStatus, outBadLayers, useParallel);
@@ -1421,6 +1440,7 @@ ZSPACE_INLINE bool zPrintSyn::alignStartPoints(PrintPathArray &ioPaths2D,
                                     double seamOffset, double seamSize,
                                     std::string &outStatus,
                                     std::vector<int> *outBadLayers, bool useParallel) {
+  zTsUtils::ScopedSlicingTiming methodTiming("PrintSyn.alignStartPoints");
   if (outBadLayers)
     outBadLayers->clear();
   const int totalLayers = int(ioPaths2D.size());
@@ -1477,6 +1497,7 @@ namespace {
 bool cachedRemap(zObjGraph &graph,zObjMesh &section,const zTsDetail::SurfaceQuery &query,
     double tolerance,zVectorArray *normals,const zFloatArray *heights,zFloatArray *mappedHeights,
     const zVectorArray *vertexNormals){
+  zTsUtils::ScopedSlicingTiming methodTiming("PrintSyn.cachedRemap", true);
   zPointArray p;zFnGraph fn(graph);fn.getVertexPositions(p);ParameterGraph params;fn.getEdgeData(params.edgeConnects);
   params.vertices.reserve(p.size());
   for(const auto &point:p){if(!std::isfinite(point.x)||!std::isfinite(point.y)||!std::isfinite(point.z))return false;
@@ -1496,6 +1517,7 @@ ZSPACE_INLINE bool zPrintSyn::projectPrintPaths(const PrintPathArray &paths2D,
                                      std::vector<int> *outBadLayers, bool useParallel,
                                      const std::vector<zFloatArray> *perLayerVertexHeights,
                                      const std::vector<zVectorArray> *perLayerVertexNormals) {
+  zTsUtils::ScopedSlicingTiming methodTiming("PrintSyn.projectPrintPaths");
   outPaths3D.clear();
   if (outBadLayers)
     outBadLayers->clear();
@@ -1632,6 +1654,7 @@ ZSPACE_INLINE bool zPrintSyn::projectPrintPaths(const PrintPathArray &paths2D,
 ZSPACE_INLINE bool zPrintSyn::linkPrintPaths(const PrintPathArray &paths3D,
                                   PrintPath &outCombined,
                                   std::string &outStatus) {
+  zTsUtils::ScopedSlicingTiming methodTiming("PrintSyn.linkPrintPaths");
   outCombined = PrintPath();
 
   bool hasHeights = false, hasNormals = false, hasTrackIds = false, hasFeatures = false;
@@ -1784,6 +1807,7 @@ ZSPACE_INLINE bool zPrintSyn::computePipeline(const zObjMeshArray &charts2D,
     const std::vector<zFloatArray> *perLayerVertexHeights,
     const std::vector<zVectorArray> *perLayerVertexNormals,PrintPathArray *outSurfaceContours2D,
     const std::vector<zTsField::FaceTagSource> *faceTagSources) {
+  zTsUtils::ScopedSlicingTiming methodTiming("PrintSyn.computePipeline");
   if(outSurfaceContours2D)outSurfaceContours2D->clear();
   outPaths3D.clear();
   outCombined = PrintPath();
@@ -1801,7 +1825,7 @@ ZSPACE_INLINE bool zPrintSyn::computePipeline(const zObjMeshArray &charts2D,
       layers += (i ? "," : "") + std::to_string(badLayers[i]);
     const std::string reason = ok ? "problems on layer(s) " + layers
         : outStatus + (layers.empty() ? "" : " (layers " + layers + ")");
-    if (step != "projectPrintPaths" && step != "resamplePrintPaths3D" && step != "linkPrintPaths") {
+    if (step != "projectPrintPaths" && step != "linkPrintPaths") {
       std::string projectStatus;
       if (!projectPrintPaths(outPaths2D, charts2D, sections3D, vertexLayerHeights,
                              outPaths3D, projectStatus, nullptr, useParallel, perLayerVertexHeights, perLayerVertexNormals)) outPaths3D.clear();
@@ -1823,13 +1847,12 @@ ZSPACE_INLINE bool zPrintSyn::computePipeline(const zObjMeshArray &charts2D,
       ? alignStartPoints(outPaths2D, charts2D, settings.SeamOffset, settings.SeamSize, outStatus, &badLayers, useParallel)
       : alignStartPoints(outPaths2D, charts2D, sections3D, settings.SeamOffset, settings.SeamSize, outStatus, &badLayers, useParallel);
   if (stopAt(aligned, "alignStartPoints")) return false;
-  if(tagged && stopAt(resampleFaceTaggedPaths(outPaths2D,*faceTagSources,settings,outStatus,&charts2D,&sections3D),"resampleFaceTaggedPaths"))return false;
+  if(tagged && stopAt(resampleFaceTaggedPaths(outPaths2D,*faceTagSources,settings,outStatus,&charts2D,&sections3D,useParallel),"resampleFaceTaggedPaths"))return false;
   if (stopAt(projectPrintPaths(outPaths2D, charts2D, sections3D, vertexLayerHeights,
                               outPaths3D, outStatus, &badLayers, useParallel, perLayerVertexHeights, perLayerVertexNormals), "projectPrintPaths")) return false;
   if(outSurfaceContours2D)*outSurfaceContours2D=outPaths2D;
-  badLayers.clear();
-  if (!tagged && stopAt(resamplePrintPaths3D(outPaths2D,outPaths3D,charts2D,sections3D,settings,
-      outStatus,useParallel,vertexLayerHeights,perLayerVertexHeights,perLayerVertexNormals),"resamplePrintPaths3D")) return false;
+  // Keep the sampled 2D target identities/counts through projection and linking.
+  // In particular, do not redistribute targets by mapped 3D span length.
   if (stopAt(linkPrintPaths(outPaths3D, outCombined, outStatus), "linkPrintPaths")) return false;
   outStatus = "computePostProcess: " + std::to_string(n) + " layers processed. " + outStatus;
   return true;

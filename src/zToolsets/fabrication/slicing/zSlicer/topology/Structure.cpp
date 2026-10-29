@@ -348,6 +348,7 @@ bool _traceColumn(zObjMesh &mesh, const zIntArray &tags, int v, int maxSteps,
 // bracing parameterization - all from the input
 // mesh and its vertex tags (see the class comment).
 ZSPACE_INLINE bool TopologySlicer::computeBasicStructure(bool useParallel) {
+  zTsUtils::ScopedSlicingTiming methodTiming("TopologySlicer.computeBasicStructure");
   const bool success = computeBasicStructureImpl(useParallel);
   if (success) zTsUtils::printSuccess("[TopologySlicer::computeBasicStructure] Success");
   else zTsUtils::printError("[TopologySlicer::computeBasicStructure] Failed");
@@ -542,6 +543,7 @@ ZSPACE_INLINE bool TopologySlicer::computeBasicStructureImpl(bool useParallel) {
 
 // Interpolates layer section meshes/boundaries/bracing along the V-loops.
 ZSPACE_INLINE bool TopologySlicer::computeSlice(bool useParallel) {
+  zTsUtils::ScopedSlicingTiming methodTiming("TopologySlicer.computeSlice");
   const bool success = computeSliceImpl(useParallel);
   if (success) zTsUtils::printSuccess("[TopologySlicer::computeSlice] Success");
   else zTsUtils::printError("[TopologySlicer::computeSlice] Failed");

@@ -30,6 +30,7 @@ namespace zSpace {
 //--------------------------
 
 ZSPACE_INLINE bool TopologySlicer::computeSlicer(bool useParallel) {
+  zTsUtils::ScopedSlicingTiming methodTiming("TopologySlicer.computeSlicer");
   const bool success = computeSlicerImpl(useParallel);
   if (success) zTsUtils::printSuccess("[TopologySlicer::computeSlicer] Success");
   else zTsUtils::printError("[TopologySlicer::computeSlicer] Failed");
@@ -60,6 +61,7 @@ ZSPACE_INLINE bool TopologySlicer::computeSlicerImpl(bool useParallel) {
 // o_PrintPaths3D for inspection (no o_ResultantPrintPath), _Status names the
 // step and its layers, and false is returned.
 ZSPACE_INLINE bool TopologySlicer::computePostProcess(const PrintSynSetting &settings, bool useParallel) {
+  zTsUtils::ScopedSlicingTiming methodTiming("TopologySlicer.computePostProcess");
   const bool success = computePostProcessImpl(settings, useParallel);
   if (success) updatePrintStatistics(true);
   else resetPrintStatistics();

@@ -53,7 +53,8 @@ const auto& combined = session.getResultantPrintPath();
 `computeSlicer()` runs through layer meshes, unrolled charts and fields.
 `computePrintPath()` extracts/maps paths without PrintSyn.
 `computePostProcess()` extracts paths and applies PrintSyn corner reconstruction,
-2D resampling, seam alignment, projection, feature-span 3D resampling and linking.
+2D resampling, seam alignment, projection and linking. FaceTag paths use
+fixed-count sampling after seam alignment. Neither route resamples in 3D.
 Failures retain diagnostic partial results
 where the desktop implementation did so; check the return value and status
 before consuming the combined path.
@@ -79,28 +80,34 @@ ordinary path geometry. Packaged runtimes require a separate build/deployment.
 is excluded. Short nonzero edges participate in detection; coincident edges
 cannot define an angle. Open endpoints are mandatory even without a feature bit.
 Corner reconstruction replaces a usable group of angle-selected vertices by
-the incoming/outgoing support-line intersection and records its intersection
-bit plus the group's angle bits. Unsupported groups retain their original
-angle targets. Previously recorded features are anchors on subsequent calls.
+the incoming/outgoing support-line intersection. Unsupported groups retain
+their original geometry. Reconstruction and sampling refresh angle flags from
+the current geometry; historical angle/intersection masks do not create anchors.
+`featureVertexIds()` likewise re-detects geometric corners at its supplied threshold.
 
-The first `ResampleLength` pass measures arc length in the **2D chart**, in model
+The `ResampleLength` pass measures arc length in the **2D chart**, in model
 units (normally millimetres). Sampling phase restarts at mandatory targets. A regular
-sample within `min(0.01, 0.1 * ResampleLength)` of the following required point
-(including the closing edge's start) yields to that exact point. Two distinct mandatory coordinates never weld,
-even below that clearance or across loop closure. Exactly coincident consecutive
-targets coalesce with their masks combined and the first required point's
-attributes retained; exact closing duplicates coalesce into the first vertex.
+sample within 0.01 mm of the following geometric corner or endpoint yields to
+that exact point. Consecutive targets closer than 0.01 mm merge, including
+across loop closure; a geometric corner wins over an ordinary seam start.
+Tagged sampling first merges protected corner/category-transition spans whose
+intervening chart or projected world arc is shorter than 0.01 mm. It retains
+the exact surviving corner's coordinates and attributes, leaves dense ordinary
+contour vertices intact, then computes the shared FaceTag budgets. A short
+categorical run can disappear. Unchanged categorical ownership must permit
+equal segment and unique point-label totals across layers; incompatible counts
+fail explicitly. Per-span interval limits redistribute a feasible fixed count
+without discarding generated targets after allocation. Final tagged targets
+are checked for 0.01 mm clearance in both the chart and printable section.
 Intervals near corners/endpoints can differ from the nominal spacing.
 
-After reconstruction, seams and mapping, a second pass reuses `ResampleLength`
-on the mapped **3D polyline**. Each span between mandatory features/endpoints
-is divided into `ceil(spanLength / ResampleLength)` equal intervals. Ordinary
-targets yield when their arc distance to either adjacent anchor is less than
-half `ResampleLength`. Each new ordinary target is projected to the current
-section using a cached triangle BVH; targets closer than half the spacing to
-either adjacent anchor in 3D also yield. Mandatory coordinates and feature masks
-remain exact even on short spans. A curve's start/seam is an anchor; closed
-curves retain closure and require at least three targets.
+After reconstruction, sampling and seam work, mapping preserves the 2D target
+counts, feature identities and order when producing 3D paths. The production
+pipeline proceeds directly from projection to linking, without a second 3D
+resampling pass. FaceTag budgets therefore remain intact; geometric chart
+distortion can produce different spacings on the mapped 3D surface. The explicit
+`resamplePrintPaths3D()` utility remains available for separate callers, but is
+not part of `computePipeline()`.
 
 Surface barycentrics update the matching 2D coordinates and interpolate existing
 section heights and normals; widths and track IDs interpolate along the mapped
@@ -216,17 +223,23 @@ tolerance`, separate from the expanded projection/containment slab.
 Moved vertices receive fresh tetrahedral UV coordinates. Intermediate print normals
 are recovered from area-weighted mesh normals and barycentrically interpolated
 onto path targets. Unsupported float-scale normals are recovered from a reliable
-neighbouring mesh ring. Fixed caps retain face normals so their sharp ridges are
-not blended away. Heights are recomputed against neighbouring relaxed meshes along
+neighbouring mesh ring. Fixed caps retain their outward winding and solver
+normal convention. For fabrication only, the bottom cap supplies inward
+area-weighted vertex normals to path projection, so its one-sided print height
+extends toward increasing harmonic layers. This local direction follows the
+cap geometry even when the solid is rotated; source meshes, tetrahedra and
+height-solver normals are unchanged. The projection override is rebuilt after
+relaxation and surface-height feedback, including zero relaxation iterations.
+Heights are recomputed against neighbouring relaxed meshes along
 the recovered normal, averaging the two full adjacent gaps for an intermediate
 layer and using one full gap at each cap. If a trimmed side boundary prevents a
 ray hit, a local tangent-plane estimate from the closest adjacent point and its
 recovered normal is used and counted. These are geometric spacing estimates,
 not a nozzle-clearance or extrusion optimisation.
 
-Angle and intersection features are generated from the resulting layer charts;
-PrintSyn retains their mandatory coordinates and provenance through sampling,
-projection and linking. Relaxation does not move already-generated path targets.
+Geometric features are detected from the resulting layer charts; PrintSyn
+re-detects them during reconstruction/sampling and carries aligned metadata
+through projection and linking. Relaxation does not move already-generated path targets.
 The optional per-section normal tables follow the same ordering contract as the
 per-section height tables; an empty normal table uses the existing face-normal
 mapping. Zero relaxation iterations retains the previous geometry, gradient-based
@@ -274,8 +287,15 @@ at the user's request and is not a valid physical extrusion result. Relaxed
 example path heights range from 5.841 to 16.983 mm. Native checks passing do not
 constitute printability approval.
 
-`zTsUtils::buildPrintMesh()` lofts one centered rectangle per print-path vertex,
-using its width, height and normalized print normal. Each graph component and
+`zTsUtils::buildPrintMesh()` lofts one rectangle per print-path vertex, with width
+centered on the path (`-width/2` to `+width/2`) and height extending from `0` to
+`height`. Sections are perpendicular to the neighbor-to-neighbor chord, with
+the print normal projected into the section's height axis. Raw edge vectors
+retain segment-length weighting at corners; endpoint tangents use the adjacent
+edge and closed curves use wrapped neighbors. Chords stay forward throughout to
+avoid flipping rectangle vertex order. A complete reversal uses the outgoing
+edge; a print normal parallel to the section tangent is rejected.
+Each graph component and
 layer stays separate; open paths receive end caps. Zero widths/heights retain
 collapsed sections, and invalid attributes or connectivity clear the mesh and
 return a diagnostic with the layer/path location.
