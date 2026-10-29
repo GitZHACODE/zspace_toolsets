@@ -191,6 +191,8 @@ public:
 
   zObjMeshArray &getIsoMeshes() { return o_IsoMeshes; }
   const zObjMeshArray &getIsoMeshes() const { return o_IsoMeshes; }
+  // Section zero supports deposition; TCP layer p uses section p+1.
+  int getPrintSectionOffset() const { return 1; }
   zObjMeshArray &getIsoMeshes2D() { return o_IsoMeshes2D; }
   const zObjMeshArray &getIsoMeshes2D() const { return o_IsoMeshes2D; }
 

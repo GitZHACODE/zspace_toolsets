@@ -6,6 +6,25 @@
 
 namespace zSpace {
 namespace zTsUtils {
+namespace {
+constexpr int ProfileSides = 16;
+// Counterclockwise in the width/height section. Index zero is the TCP at the
+// top of the bead; exact cardinal directions avoid trigonometric drift there.
+const std::array<std::array<double, 2>, ProfileSides> &ellipseProfile() {
+  static const auto profile = [] {
+    std::array<std::array<double, 2>, ProfileSides> ring{};
+    constexpr double tau = 6.283185307179586476925286766559;
+    for (int i = 0; i < ProfileSides; ++i) {
+      const double angle = tau * i / ProfileSides;
+      ring[i] = {-std::sin(angle), std::cos(angle)};
+    }
+    ring[0] = {0, 1}; ring[4] = {-1, 0};
+    ring[8] = {0, -1}; ring[12] = {1, 0};
+    return ring;
+  }();
+  return profile;
+}
+}
 
 bool buildPrintMesh(const PrintPathArray &layers, zObjMesh &outMesh,
                     std::string *outError) {
@@ -58,7 +77,7 @@ bool buildPrintMesh(const PrintPathArray &layers, zObjMesh &outMesh,
           if (n < (curve.Closed ? 3u : 2u))
             throw std::runtime_error("Insufficient curve vertices.");
           if (n >
-              (size_t(std::numeric_limits<int>::max()) - vertices.size()) / 4)
+              (size_t(std::numeric_limits<int>::max()) - vertices.size()) / ProfileSides)
             throw std::runtime_error("Print mesh exceeds the index range.");
           visited += n;
           const int base = static_cast<int>(vertices.size());
@@ -90,28 +109,30 @@ bool buildPrintMesh(const PrintPathArray &layers, zObjMesh &outMesh,
                                        "cross-section width");
             const zVector height = unit(vecCross(tangent, width),
                                         "cross-section height");
-            const double w = path.widths[id] * 0.5, h = path.heights[id];
-            for (const auto &sign :
-                 {std::array<int, 2>{-1, 0}, {1, 0}, {1, 1}, {-1, 1}}) {
+            const double w = path.widths[id] * 0.5, h = path.heights[id] * 0.5;
+            for (const auto &sample : ellipseProfile()) {
               const auto &center = points[id];
-              zPoint corner(
-                  center.x + sign[0] * w * width.x + sign[1] * h * height.x,
-                  center.y + sign[0] * w * width.y + sign[1] * h * height.y,
-                  center.z + sign[0] * w * width.z + sign[1] * h * height.z);
-              if (!finite(corner))
+              const double x = sample[0] * w, y = (sample[1] - 1) * h;
+              zPoint vertex(center.x + x * width.x + y * height.x,
+                            center.y + x * width.y + y * height.y,
+                            center.z + x * width.z + y * height.z);
+              if (!finite(vertex))
                 throw std::runtime_error("Section coordinate overflow.");
-              vertices.push_back(corner);
+              vertices.push_back(vertex);
             }
           }
           for (size_t i = 0; i < segments; ++i) {
-            const int a = base + int(4 * i), b = base + int(4 * ((i + 1) % n));
-            for (int j = 0; j < 4; ++j)
-              quad(a + j, a + (j + 1) % 4, b + (j + 1) % 4, b + j);
+            const int a = base + int(ProfileSides * i), b = base + int(ProfileSides * ((i + 1) % n));
+            for (int j = 0; j < ProfileSides; ++j)
+              quad(a + j, a + (j + 1) % ProfileSides,
+                   b + (j + 1) % ProfileSides, b + j);
           }
           if (!curve.Closed) {
-            quad(base + 3, base + 2, base + 1, base);
-            const int end = base + int(4 * (n - 1));
-            quad(end, end + 1, end + 2, end + 3);
+            counts.push_back(ProfileSides);
+            for (int j = ProfileSides - 1; j >= 0; --j) connects.push_back(base + j);
+            const int end = base + int(ProfileSides * (n - 1));
+            counts.push_back(ProfileSides);
+            for (int j = 0; j < ProfileSides; ++j) connects.push_back(end + j);
           }
         }
         if (visited != points.size())

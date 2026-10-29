@@ -13,11 +13,15 @@ struct Input {
   zObjMesh mesh; zIntArray tags,widths; zObjGraph bracing;
   zPoint anchor; SlicerSettings settings; PrintSynSetting print;
 };
-Input synthetic() {
+Input synthetic(bool outward=false) {
   Input in;
+  // The positive fabrication fixture contracts so every TCP normal has a
+  // previous-surface hit. The former outward fixture is retained below as an
+  // unsupported-overhang test instead of accepting plane-extrapolated heights.
+  const float middle=outward?4.5f:3.5f,top=outward?5.0f:3.0f;
   zPointArray p{{0,0,0},{4,0,0},{4,4,0},{0,4,0},
-    {0,0,1},{4.5,0,1},{4.5,4,1},{0,4,1},
-    {0,0,2},{5,0,2},{5,4,2},{0,4,2}};
+    {0,0,1},{middle,0,1},{middle,4,1},{0,4,1},
+    {0,0,2},{top,0,2},{top,4,2},{0,4,2}};
   zIntArray c(10,4),v{0,3,2,1,8,9,10,11,0,1,5,4,1,2,6,5,2,3,7,6,3,0,4,7,4,5,9,8,5,6,10,9,6,7,11,10,7,4,8,11};
   zFnMesh(in.mesh).create(p,c,v); in.tags={1,2,3,4,5,6,3,4,5,6};
   in.widths={-1,-1,0,0,0,0,0,0,0,0}; in.anchor={0,2,0};
@@ -167,6 +171,12 @@ int main(int argc,char **argv) {
       std::cout<<"PASS slicing-only baseline\n";return 0;
     }
     run(in,mode,false,argc>2);run(in,mode,true,argc>2);
+    if(mode==1&&argc<=2){auto overhang=synthetic(true);zTsSlicing unsupported;configure(unsupported,overhang,mode);
+      require(unsupported.computeSlicer(false),unsupported.getStatus());
+      require(!unsupported.computePostProcess(false)&&unsupported.getStatus().find("previous-layer support")!=std::string::npos,
+              "Outward-taper TCP without actual previous-surface support was accepted");
+      require(!unsupported.hasPrintStatistics()&&zFnGraph(const_cast<PrintPath&>(unsupported.getResultantPrintPath()).graph).numVertices()==0,
+              "Unsupported overhang retained a fabrication result/statistics");}
     return 0;
   }catch(const std::exception &e){std::cerr<<"FAIL: "<<e.what()<<"\n";return 1;}
 }

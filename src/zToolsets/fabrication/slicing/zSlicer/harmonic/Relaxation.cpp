@@ -562,24 +562,36 @@ using HeightLinks=std::vector<std::vector<std::vector<HeightLink>>>;
 struct HeightQueryFailure {int LayerId=-1,Vertex=-1,Adjacent=-1;};
 bool refreshHeights(std::vector<Layer> &layers,double tol,Report &report,std::string &error,bool parallel,
                     HeightLinks *links=nullptr,const std::vector<char> *refreshMask=nullptr,HeightQueryFailure *queryFailure=nullptr,
-                    std::vector<std::unique_ptr<Tree>> *cache=nullptr) {
+                    std::vector<std::unique_ptr<Tree>> *cache=nullptr,bool preparedTrees=false) {
+  zTsUtils::ScopedSlicingTiming methodTiming("Height.refreshHeights");
   std::vector<HeightQueryFailure> queryFailures(layers.size());
   if(links&&links->size()!=layers.size())links->resize(layers.size());
   std::vector<std::unique_ptr<Tree>> localTrees;
   if(cache){if(cache->size()!=layers.size())cache->resize(layers.size());}else localTrees.resize(layers.size());
   auto &trees=cache?*cache:localTrees;std::vector<zVectorArray> n(layers.size());
-  for(size_t k=0;k<layers.size();++k){bool needed=!refreshMask||(*refreshMask)[k]||(k>0&&(*refreshMask)[k-1])||(k+1<layers.size()&&(*refreshMask)[k+1]);
-    if(needed){if(trees[k])trees[k]->refit(layers[k].Positions);else trees[k].reset(new Tree(layers[k].Positions,layers[k].Triangles));n[k]=normals(layers[k]);}}
-  std::vector<int> planeEstimates(layers.size(),0);std::vector<std::string> errors(layers.size());
+  zTsDetail::ParallelErrors preparation(layers.size());
+  {
+    zTsUtils::ScopedSlicingTiming geometryTiming("Height.refreshGeometry");
+    #pragma omp parallel for schedule(dynamic) if(parallel)
+    for(int k=0;k<int(layers.size());++k){try{
+      const bool needed=!refreshMask||(*refreshMask)[k]||(k>0&&(*refreshMask)[k-1])||(k+1<int(layers.size())&&(*refreshMask)[k+1]);
+      if(needed){if(!trees[k])trees[k].reset(new Tree(layers[k].Positions,layers[k].Triangles));
+        else if(!preparedTrees)trees[k]->refit(layers[k].Positions);
+        n[k]=normals(layers[k]);}
+    }catch(...){preparation.capture(k);}}
+    preparation.rethrow();
+  }
+  std::vector<int> planeEstimates(layers.size(),0),unavailableAuxiliary(layers.size(),0);std::vector<std::string> errors(layers.size());
   const auto refresh=[&](size_t k){std::string &error=errors[k];Layer &m=layers[k];m.Heights.resize(m.Positions.size());
     std::vector<std::vector<HeightLink>> previous;
     if(links){previous=std::move((*links)[k]);(*links)[k].resize(m.Positions.size());}
-    if(k>0&&k+1<layers.size())m.Normals=n[k];
+    if(k>0)m.Normals=n[k];
     for(size_t i=0;i<m.Positions.size();++i){const V p=toEigenVec(m.Positions[i]),normal=toEigenVec(n[k][i]);
       if(queryFailure)queryFailures[k]={int(k),int(i),-1};
       if(normal.norm()<0.5){error="Cannot recover a finite layer normal.";return false;}
-      double total=0;int count=0;
+      double primaryHeight=0;
       for(int offset:{-1,1}){const int adjacent=int(k)+offset;if(adjacent<0||adjacent>=int(layers.size()))continue;
+        const bool primary=k>0&&adjacent==int(k)-1;
         if(queryFailure)queryFailures[k].Adjacent=adjacent;
         int hint=-1;if(i<previous.size())for(const auto &old:previous[i])if(old.LayerId==adjacent){hint=old.Triangle;break;}
         int tri=-1;V q;const double nearest=trees[adjacent]->nearest(p,tri,q,hint);
@@ -600,25 +612,34 @@ bool refreshHeights(std::vector<Layer> &layers,double tol,Report &report,std::st
           V faceNormal=V::Zero();for(int j=0;j<3;++j)faceNormal+=localWeights[j]*toEigenVec(n[adjacent][layers[adjacent].Triangles[tri][j]]);
           if(links)normalLength=faceNormal.norm();faceNormal.normalize();
           const double den=faceNormal.dot(direction);
-          if(std::abs(den)<0.25){error="Adjacent layer is nearly tangent to the print-height ray on layer "+std::to_string(k)+", vertex "+std::to_string(i)+", neighbour "+std::to_string(adjacent)+".";return false;}
+          if(!std::isfinite(den)||std::abs(den)<0.25){
+            if(!primary){++unavailableAuxiliary[k];continue;}
+            error="Previous layer is nearly tangent to the TCP height ray on layer "+std::to_string(k)+", vertex "+std::to_string(i)+", neighbour "+std::to_string(adjacent)+".";return false;}
           h=faceNormal.dot(q-p)/den;++planeEstimates[k];
           if(links){hitTriangle=tri;planeNormal=faceNormal;weights=barycentric(q,face);fallback=true;}
         }
-        if(!std::isfinite(h)||h<=tol){error="Cannot estimate positive spacing on layer "+std::to_string(k)+", vertex "+std::to_string(i)+", neighbour "+std::to_string(adjacent)+".";return false;}
-        total+=h;++count;
+        if(!std::isfinite(h)||h<=tol){if(!primary){++unavailableAuxiliary[k];continue;}
+          error="Cannot estimate positive previous-layer TCP spacing on layer "+std::to_string(k)+", vertex "+std::to_string(i)+", neighbour "+std::to_string(adjacent)+".";return false;}
+        // TCP height is the directed clearance to the previously printed
+        // layer along -normal. S0 is an unprinted substrate reference; its
+        // optional next-gap value is diagnostic and never a height constraint.
+        if(primary||k==0)primaryHeight=h;
         if(links){if(planeNormal.squaredNorm()==0){const Face &face=trees[adjacent]->face(hitTriangle);planeNormal=face.normal().normalized();weights=barycentric(p+h*direction,face);}
           weights=weights.cwiseMax(0);weights/=weights.sum();
           (*links)[k][i].push_back({adjacent,layers[adjacent].Triangles[hitTriangle],weights,planeNormal,direction,fallback?q:p+h*direction,h,normalLength,fallback,hitTriangle});}
       }
-      m.Heights[i]=float(total/count);
+      if(k>0&&!(primaryHeight>tol)){error="Missing previous-layer TCP height.";return false;}
+      m.Heights[i]=float(primaryHeight);
     }
     return true;
   };
+  zTsUtils::ScopedSlicingTiming correspondenceTiming("Height.correspondences");
   zTsDetail::ParallelErrors failures(layers.size());
   #pragma omp parallel for schedule(dynamic) if(parallel)
   for(int k=0;k<int(layers.size());++k){try{if(!refreshMask||(*refreshMask)[k])refresh(size_t(k));}catch(...){failures.capture(k);}}
   failures.rethrow();
-  for(size_t k=0;k<layers.size();++k){report.PlaneHeightEstimates+=planeEstimates[k];if(!errors[k].empty()){error=errors[k];if(queryFailure)*queryFailure=queryFailures[k];return false;}}
+  for(size_t k=0;k<layers.size();++k){report.PlaneHeightEstimates+=planeEstimates[k];report.UnavailableAuxiliaryGaps+=unavailableAuxiliary[k];
+    if(!errors[k].empty()){error=errors[k];if(queryFailure)*queryFailure=queryFailures[k];return false;}}
   return true;
 }
 } // namespace
@@ -664,6 +685,12 @@ bool relax(const Reference &reference,std::vector<Layer> &layers,const Settings 
   for(size_t k=1;k+1<layers.size();++k)if(!prepareErrors[k].empty()){error="Layer "+std::to_string(k)+": "+prepareErrors[k];return false;}
   std::vector<std::set<int>> uvConstrained(layers.size());
   mark(2);
+  // Geometrically separated meshes can still have unusable directed height
+  // rays at a sharp boundary. Remember whether the seed is measurable, so a
+  // fairing step cannot discard the last usable complete stack.
+  bool measurable=false;
+  {auto measured=layers;Report ignored;std::string reason;
+    measurable=refreshHeights(measured,tol,ignored,reason,settings.Parallel);}
   for(int iteration=0;iteration<settings.Iterations;++iteration){std::vector<Layer> trial=layers;std::vector<char> moved(layers.size(),0),crossed(layers.size()-1,0);
     zTsDetail::ParallelErrors trialFailures(layers.size());
     #pragma omp parallel for schedule(dynamic) if(settings.Parallel)
@@ -677,6 +704,11 @@ bool relax(const Reference &reference,std::vector<Layer> &layers,const Settings 
     const bool valid=std::find(crossed.begin(),crossed.end(),char(1))==crossed.end();
     if(!valid)report.LastRejectedReason="adjacent layer intersection";
     if(!valid||!accepted)break;
+    Report heightReport;std::string heightError;bool trialMeasurable=false;
+    {zTsUtils::ScopedSlicingTiming feasibilityTiming("Relaxation.heightFeasibility");
+      trialMeasurable=refreshHeights(trial,tol,heightReport,heightError,settings.Parallel);}
+    if(!trialMeasurable&&measurable){report.LastRejectedReason="Rejected unmeasurable fairing step: "+heightError;break;}
+    measurable=trialMeasurable;
     layers.swap(trial);++report.AcceptedIterations;
   }
   for(size_t k=1;k+1<layers.size();++k){report.UVConstrainedVertices+=int(uvConstrained[k].size());
@@ -703,13 +735,43 @@ bool validHeightSettings(const PrintHeightOptimizationSettings &s,std::string &e
 double bandViolation(double h,const PrintHeightOptimizationSettings &s) {
   return (std::max)({0.0,s.Minimum-h,h-s.Maximum});
 }
-struct HeightSample {Tri Ids{};V Weights=V::Zero();bool Primary=true;};
+struct HeightSample {
+  Tri Ids{};V Weights=V::Zero();bool Primary=true,Exact=false;
+  HeightLink Hit;V Position=V::Zero(),Normal=V::Zero();double NormalLength=1;
+};
 using HeightSamples=std::vector<std::vector<HeightSample>>;
-double sampleHeight(const Layer &layer,const HeightSample &sample){return zTsDetail::interpolateScalar(layer.Heights[sample.Ids[0]],layer.Heights[sample.Ids[1]],layer.Heights[sample.Ids[2]],sample.Weights[0],sample.Weights[1],sample.Weights[2]);}
+double sampleHeight(const Layer &layer,const HeightSample &sample){return sample.Exact?sample.Hit.Height:zTsDetail::interpolateScalar(layer.Heights[sample.Ids[0]],layer.Heights[sample.Ids[1]],layer.Heights[sample.Ids[2]],sample.Weights[0],sample.Weights[1],sample.Weights[2]);}
+
+bool refreshExactSamples(const std::vector<Layer> &layers,HeightSamples &samples,
+    const std::vector<std::unique_ptr<Tree>> &trees,double maximum,double tol,
+    std::string &error,bool parallel,const std::vector<char> *mask=nullptr,HeightQueryFailure *failure=nullptr) {
+  zTsUtils::ScopedSlicingTiming timing("Height.refreshExactSamples");
+  std::vector<std::string> errors(layers.size());zTsDetail::ParallelErrors failures(layers.size());
+  #pragma omp parallel for schedule(dynamic) if(parallel)
+  for(int k=1;k<int(layers.size());++k){try{if(mask&&!(*mask)[k])continue;
+    for(auto &sample:samples[k]){if(!sample.Exact)continue;sample.Position.setZero();V sum=V::Zero();
+      for(int j=0;j<3;++j){sample.Position+=sample.Weights[j]*toEigenVec(layers[k].Positions[sample.Ids[j]]);
+        sum+=sample.Weights[j]*toEigenVec(layers[k].Normals[sample.Ids[j]]);}
+      sample.NormalLength=sum.norm();if(!sum.allFinite()||sample.NormalLength<1e-8){errors[k]="Invalid interpolated TCP normal.";break;}
+      sample.Normal=sum/sample.NormalLength;const V direction=-sample.Normal;
+      int nearestTri=-1;V nearest;const double clearance=trees[k-1]->nearest(sample.Position,nearestTri,nearest,sample.Hit.Triangle);
+      if(!(clearance>tol)){errors[k]="TCP touches its previously printed surface.";break;}
+      int triangle=-1;const double height=trees[k-1]->ray(sample.Position,direction,maximum,tol,&triangle,sample.Hit.Triangle);
+      if(!std::isfinite(height)||triangle<0){errors[k]="TCP normal ray misses its previously printed surface on section "+std::to_string(k)+".";break;}
+      const Face &face=trees[k-1]->face(triangle);V weights=barycentric(sample.Position+height*direction,face).cwiseMax(0);weights/=weights.sum();
+      sample.Hit={k-1,layers[k-1].Triangles[triangle],weights,face.normal().normalized(),direction,
+        sample.Position+height*direction,height,1,false,triangle};
+    }
+  }catch(...){failures.capture(k);}}
+  failures.rethrow();for(int k=1;k<int(errors.size());++k)if(!errors[k].empty()){
+    error=errors[k];if(failure)*failure={k,-1,k-1};return false;}
+  return true;
+}
 double heightScore(const std::vector<Layer> &layers,const HeightSamples &samples,const PrintHeightOptimizationSettings &s,HeightReport &r) {
   r.Minimum=inf;r.Maximum=0;r.WorstViolation=0;r.ViolatingVertices=0;double score=0;
-  // The exact top cap is retained as a reference, but is not printed.
-  for(size_t k=0;k+1<layers.size();++k)for(const auto &point:samples[k]){const double h=sampleHeight(layers[k],point);
+  // TCPs occupy S1..Slast. S0 is the fixed substrate reference; the fixed top
+  // contact is the final printed TCP surface and has a previous-layer gap.
+  for(size_t k=1;k<layers.size();++k)for(const auto &point:samples[k]){const double h=sampleHeight(layers[k],point);
     const double v=bandViolation(h,s),residual=(std::max)(0.0,v-.5*s.Tolerance);
     score+=residual*residual;if(point.Primary){r.Minimum=(std::min)(r.Minimum,double(h));r.Maximum=(std::max)(r.Maximum,double(h));
       r.WorstViolation=(std::max)(r.WorstViolation,v);if(v>s.Tolerance)++r.ViolatingVertices;}}
@@ -728,7 +790,7 @@ bool redistributeIsoValues(std::vector<Layer> layers,const PrintHeightOptimizati
   const int n=int(layers.size())-1;Eigen::VectorXd scale=Eigen::VectorXd::Ones(n);
   const double margin=(std::min)(.02*(s.Maximum-s.Minimum),.1*s.Minimum);
   std::vector<std::pair<double,double>> ranges(n);
-  for(int k=0;k<n;++k){auto h=layers[k].Heights;std::sort(h.begin(),h.end());
+  for(int k=0;k<n;++k){auto h=layers[k+1].Heights;std::sort(h.begin(),h.end());
     // Robust initializer only: isolated nodal slivers must not displace an
     // entire layer. Every vertex/path is still checked by the geometric stage.
     ranges[k]={h[size_t(.01*(h.size()-1))],h[size_t(.99*(h.size()-1))]};}
@@ -737,7 +799,7 @@ bool redistributeIsoValues(std::vector<Layer> layers,const PrintHeightOptimizati
   for(int it=0;it<20;++it){Eigen::MatrixXd a=Eigen::MatrixXd::Identity(n+1,n+1)*1e-3;Eigen::VectorXd b=Eigen::VectorXd::Zero(n+1);a(n,n)=0;
     for(int k=0;k<n;++k){a(k,n)=a(n,k)=1;b[k]=1e-3;}b[n]=n;
     for(int k=0;k<n;++k)for(double h:{ranges[k].first,ranges[k].second}){
-      Eigen::VectorXd row=Eigen::VectorXd::Zero(n);if(k==0)row[0]=h;else{row[k-1]=h*.5;row[k]=h*.5;}
+      Eigen::VectorXd row=Eigen::VectorXd::Zero(n);row[k]=h;
       const double value=row.dot(scale),epsilon=1e-5*s.Maximum;
       // This approximate initializer must leave an already feasible schedule
       // alone, including exact bounds and float-scale field-gradient noise.
@@ -767,12 +829,20 @@ struct SurfaceSystem {
 };
 constexpr double seedWeight=.001, coherenceWeight=.1, consensusPenalty=8;
 bool surfaceSystem(const Layer &m,const Work &w,SurfaceSystem &system,std::string &error){
+  zTsUtils::ScopedSlicingTiming methodTiming("Height.factorSurface",true);
   ++system.Generation;
   const int n=int(m.Positions.size());system.Index.assign(n,-1);system.Basis.assign(n,Eigen::Matrix3d::Zero());system.Dimensions.assign(n,0);int count=0;
   for(int i=0;i<n;++i)if(!w.fixed[i]){Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eig(w.Tangents[i]);
     for(int d=0;d<3;++d)if(eig.eigenvalues()[d]>.5)system.Basis[i].col(system.Dimensions[i]++)=eig.eigenvectors().col(d);
     if(system.Dimensions[i]){system.Index[i]=count;count+=system.Dimensions[i];}}
   system.Solver.reset();system.FixedRhs=Eigen::MatrixXd::Zero(count,1);if(count==0)return true;
+  // The unknown is a displacement from the seed. Absolute surface fairing
+  // contributes -B*X_seed; omitting this term smooths only the displacement
+  // and can preserve or amplify a rough seed during height correction.
+  Eigen::MatrixXd seed(n,3);for(int i=0;i<n;++i)seed.row(i)=(toEigenVec(w.original.Positions[i])-w.planeOrigin).transpose();
+  const Eigen::MatrixXd fairingForce=-w.bending*seed;
+  for(int i=0;i<n;++i)if(system.Index[i]>=0)for(int d=0;d<system.Dimensions[i];++d)
+    system.FixedRhs(system.Index[i]+d,0)=system.Basis[i].col(d).dot(fairingForce.row(i).transpose());
   Sparse matrix=w.bending;for(int i=0;i<n;++i)matrix.coeffRef(i,i)+=(consensusPenalty+seedWeight+coherenceWeight)*w.mass[i];
   std::vector<Eigen::Triplet<double>> entries;
   for(int c=0;c<matrix.outerSize();++c)for(Sparse::InnerIterator it(matrix,c);it;++it){
@@ -799,6 +869,7 @@ Positions positions(const std::vector<Layer> &layers){Positions x(layers.size())
 
 void projectContacts(Positions &x,const std::vector<Layer> &layers,const std::vector<SurfaceSystem> &systems,
                      std::vector<ContactGuard> &guards,double tolerance){
+  zTsUtils::ScopedSlicingTiming methodTiming("Height.projectContacts");
   for(auto &guard:guards){const auto prepare=[&](int layer,int face,int &version,std::array<Eigen::MatrixXd,3> &responses,double sign){
       if(version==systems[layer].Generation)return;version=systems[layer].Generation;const auto &system=systems[layer];
       for(int j=0;j<3;++j){responses[j]=Eigen::MatrixXd::Zero(x[layer].rows(),3);if(!system.Solver)continue;
@@ -872,12 +943,14 @@ V closestWeightDerivative(const Face &face,const V &weights,const V &p,const V &
 std::vector<HeightProjection> heightProjections(const std::vector<Layer> &layers,const HeightLinks &links,
     const HeightSamples &samples,const std::vector<Work> &work,const SideConstraints &side,
     std::vector<Eigen::VectorXd> &degrees,const PrintHeightOptimizationSettings &settings,bool orientation,
-    std::vector<std::vector<double>> &multipliers,const std::vector<ContactGuard> &contacts){
+    std::vector<std::vector<double>> &multipliers,const std::vector<ContactGuard> &contacts,HeightReport &report){
+  zTsUtils::ScopedSlicingTiming methodTiming("Height.buildProjections");
+  report.UncontrollableSamples=0;
   std::vector<HeightProjection> rows;degrees.resize(layers.size());
   std::vector<std::unique_ptr<NormalStencils>> normalStencils(layers.size());
   std::vector<zVectorArray> capNormals(layers.size());
   for(size_t k=0;k<layers.size();++k)degrees[k]=Eigen::VectorXd::Zero(layers[k].Positions.size());
-  for(int k=0;k<int(samples.size())-1;++k)for(int sampleId=0;sampleId<int(samples[k].size());++sampleId){const auto &sample=samples[k][sampleId];
+  for(int k=1;k<int(samples.size());++k)for(int sampleId=0;sampleId<int(samples[k].size());++sampleId){const auto &sample=samples[k][sampleId];
     const double height=sampleHeight(layers[k],sample),margin=.05*(settings.Maximum-settings.Minimum);
     if(height>settings.Minimum+margin&&height<settings.Maximum-margin){multipliers[k][sampleId]=0;continue;}
     std::map<std::pair<int,int>,V> coefficients;
@@ -889,8 +962,20 @@ std::vector<HeightProjection> heightProjections(const std::vector<Layer> &layers
       if(!normalStencils[layer])normalStencils[layer].reset(new NormalStencils(layers[layer]));
       for(const auto &d:normalStencils[layer]->get(vertex))add(layer,d.first,d.second.transpose()*gradient);
     };
-    for(int j=0;j<3;++j){const double alpha=sample.Weights[j];if(alpha==0)continue;const int id=sample.Ids[j];const auto &hits=links[k][id];
-      for(const auto &hit:hits){const double den=hit.PlaneNormal.dot(hit.Direction)*hits.size();if(std::abs(den)<1e-10)continue;
+    if(sample.Exact){const auto &hit=sample.Hit;const double den=hit.PlaneNormal.dot(hit.Direction);
+      if(std::abs(den)>1e-10){const V a=hit.PlaneNormal/den;
+        for(int j=0;j<3;++j)add(k,sample.Ids[j],-sample.Weights[j]*a);
+        for(int j=0;j<3;++j)add(hit.LayerId,hit.Ids[j],hit.Weights[j]*a);
+        // N = normalize(sum alpha_j N_j). Differentiate that normalization
+        // before the existing recovered-normal one-ring stencils.
+        const V normalGradient=(hit.Height/sample.NormalLength)*
+          (a-sample.Normal*sample.Normal.dot(a));
+        for(int j=0;j<3;++j)if(sample.Weights[j])
+          normalContribution(k,sample.Ids[j],sample.Weights[j]*normalGradient);
+      }
+    }else for(int j=0;j<3;++j){const double alpha=sample.Weights[j];if(alpha==0)continue;const int id=sample.Ids[j];const auto &hits=links[k][id];
+      for(const auto &hit:hits){if(hit.LayerId!=(k==0?1:k-1))continue;
+        const double den=hit.PlaneNormal.dot(hit.Direction);if(std::abs(den)<1e-10)continue;
         const V a=alpha*hit.PlaneNormal/den;add(k,id,-a);
         for(int v=0;v<3;++v)add(hit.LayerId,hit.Ids[v],hit.Weights[v]*a);
         if(k>0&&k+1<int(layers.size())){const double sign=hit.Direction.dot(toEigenVec(layers[k].Normals[id]))>=0?1:-1;
@@ -917,10 +1002,11 @@ std::vector<HeightProjection> heightProjections(const std::vector<Layer> &layers
     double available=0;for(const auto &term:row.Terms)available+=2*work[term.Layer].limit*term.A.norm();
     if(!row.Terms.empty()&&available>=bandViolation(height,settings)){
       for(const auto &term:row.Terms)degrees[term.Layer][term.Vertex]+=1;rows.push_back(std::move(row));}
+    else if(sample.Primary&&bandViolation(height,settings)>settings.Tolerance)++report.UncontrollableSamples;
 
   }
-  // Individual gaps also need protection: the retained measurement averages
-  // two neighbours, so an acceptable average alone does not prevent contact.
+  // Both directions still supply contact guards. Constraining the deposited
+  // previous-layer TCP gap does not by itself prevent contact with the next.
   const double gapFloor=.1*settings.Minimum;
   for(int k=0;k<int(layers.size());++k)for(int i=0;i<int(links[k].size());++i)for(const auto &hit:links[k][i]){
     if(hit.Height>3*gapFloor)continue;const double den=hit.PlaneNormal.dot(hit.Direction);if(std::abs(den)<1e-10)continue;
@@ -955,9 +1041,41 @@ double bendingEnergy(const std::vector<Layer> &layers,const std::vector<Work> &w
 }
 }
 
+bool measureTargetHeights(const std::vector<Layer> &layers,
+    const std::vector<zPointArray> &targets,const std::vector<zVectorArray> &targetNormals,
+    std::vector<zFloatArray> &outHeights,std::string &error,bool parallel) {
+  zTsUtils::ScopedSlicingTiming timing("Height.measureTargetHeights");outHeights.clear();error.clear();
+  if(layers.size()<2||targets.size()+1!=layers.size()||targetNormals.size()!=targets.size()){
+    error="TCP targets/normals must match sections S1..Slast.";return false;}
+  Box box;for(const auto &layer:layers){if(!meshValid(layer,error))return false;for(const auto &p:layer.Positions)box.add(toEigenVec(p));}
+  const double maximum=2*(box.hi-box.lo).norm(),tol=(std::max)(1e-9,2e-7*(box.hi-box.lo).norm());
+  std::vector<std::unique_ptr<Tree>> trees(layers.size());zTsDetail::ParallelErrors preparation(layers.size());
+  #pragma omp parallel for schedule(dynamic) if(parallel)
+  for(int k=0;k<int(layers.size());++k){try{trees[k].reset(new Tree(layers[k].Positions,layers[k].Triangles));}catch(...){preparation.capture(k);}}
+  preparation.rethrow();std::vector<zFloatArray> measured(targets.size());std::vector<std::string> errors(targets.size());
+  zTsDetail::ParallelErrors queries(targets.size());
+  #pragma omp parallel for schedule(dynamic) if(parallel)
+  for(int p=0;p<int(targets.size());++p){try{
+    if(targetNormals[p].size()!=targets[p].size()){errors[p]="TCP normal count differs from its targets.";continue;}
+    measured[p].reserve(targets[p].size());int sourceHint=-1,previousHint=-1;
+    for(size_t i=0;i<targets[p].size();++i){const V position=toEigenVec(targets[p][i]);V normal=toEigenVec(targetNormals[p][i]);
+      if(!position.allFinite()||!normal.allFinite()||normal.norm()<1e-12){errors[p]="Invalid TCP position or normal.";break;}normal.normalize();
+      int source=-1,previous=-1;V nearest;
+      if(trees[p+1]->nearest(position,source,nearest,sourceHint)>10*tol){errors[p]="TCP target is off its indexed section.";break;}sourceHint=source;
+      if(trees[p]->nearest(position,previous,nearest,previousHint)<=tol){errors[p]="TCP target touches its previous section.";break;}previousHint=previous;
+      int hit=-1;const double height=trees[p]->ray(position,-normal,maximum,tol,&hit,previousHint);
+      if(!std::isfinite(height)||hit<0){errors[p]="TCP normal ray has no previous-layer support on printed layer "+std::to_string(p)+", target "+std::to_string(i)+".";break;}
+      previousHint=hit;measured[p].push_back(float(height));
+    }
+  }catch(...){queries.capture(p);}}
+  queries.rethrow();for(const auto &e:errors)if(!e.empty()){error=e;return false;}
+  outHeights.swap(measured);return true;
+}
+
 bool optimizeHeightDomain(const Reference &reference,std::vector<Layer> &layers,
     const PrintHeightOptimizationSettings &s,const SampleVolume &sample,bool parallel,
     HeightReport &report,std::string &error,const std::vector<zPointArray> *printTargets,double fairingStrength) {
+  zTsUtils::ScopedSlicingTiming methodTiming("Height.optimizeHeightDomain");
   report=HeightReport();error.clear();const auto start=std::chrono::steady_clock::now();
   const auto finish=[&](){report.Milliseconds=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();};
   if(!s.Enabled||!s.OptimizeSurfaces)return true;
@@ -970,11 +1088,18 @@ bool optimizeHeightDomain(const Reference &reference,std::vector<Layer> &layers,
   SideConstraints side(reference,tol,true);if(!side.build(error))return false;
   HeightLinks links;Report ignored;std::vector<std::unique_ptr<Tree>> trees;
   if(!refreshHeights(layers,tol,ignored,error,parallel,&links,nullptr,nullptr,&trees))return false;
+  const auto directedGaps=[&](){report.MinimumDirectedGap=inf;report.MaximumDirectedGap=0;report.UnavailableAuxiliaryGaps=0;
+    for(size_t k=0;k<links.size();++k)for(const auto &vertex:links[k]){
+      report.UnavailableAuxiliaryGaps+=(k>0&&k+1<links.size()?2:1)-int(vertex.size());
+      for(const auto &hit:vertex){
+      report.MinimumDirectedGap=(std::min)(report.MinimumDirectedGap,hit.Height);
+      report.MaximumDirectedGap=(std::max)(report.MaximumDirectedGap,hit.Height);}}};
+  directedGaps();
   HeightSamples samples(layers.size());
-  if(printTargets&&printTargets->size()+1!=layers.size()){error="Height targets must match the printed section prefix.";return false;}
-  for(size_t k=0;k+1<layers.size();++k){if(printTargets){
-      for(const auto &p:(*printTargets)[k]){int tri;V q;const double d=trees[k]->nearest(toEigenVec(p),tri,q);if(tri<0||d>10*tol){error="Print-height target is off its section.";return false;}
-        V w=barycentric(q,trees[k]->face(tri)).cwiseMax(0);w/=w.sum();samples[k].push_back({layers[k].Triangles[tri],w});
+  if(printTargets&&printTargets->size()+1!=layers.size()){error="Height targets must match printed TCP sections S1..Slast.";return false;}
+  for(size_t k=1;k<layers.size();++k){if(printTargets){
+      for(const auto &p:(*printTargets)[k-1]){int tri;V q;const double d=trees[k]->nearest(toEigenVec(p),tri,q);if(tri<0||d>10*tol){error="Print-height target is off its TCP section.";return false;}
+        V w=barycentric(q,trees[k]->face(tri)).cwiseMax(0);w/=w.sum();samples[k].push_back({layers[k].Triangles[tri],w});samples[k].back().Exact=true;
       }
     }else {
       // Unprinted trim-boundary slivers must not dominate the initial stack.
@@ -986,17 +1111,32 @@ bool optimizeHeightDomain(const Reference &reference,std::vector<Layer> &layers,
     }}
   size_t primaryCount=0;for(const auto &layer:samples)for(const auto &point:layer)primaryCount+=point.Primary;
   if(primaryCount==0){error="No material print-curve height supports were supplied.";return false;}
+  const double maximumRay=2*(box.hi-box.lo).norm();
+  if(!refreshExactSamples(layers,samples,trees,maximumRay,tol,error,parallel))return false;
   double score=heightScore(layers,samples,s,report);report.InitialMinimum=report.Minimum;report.InitialMaximum=report.Maximum;
   if(report.Converged){finish();return true;}
   std::vector<Work> work(layers.size());std::vector<SurfaceSystem> systems(layers.size());std::vector<std::string> errors(layers.size());
   std::vector<std::unique_ptr<Tree>> trialTrees(layers.size());std::vector<char> dirtyTrees(layers.size(),0);
   std::vector<int> geometryPriority(layers.size(),0);
+  std::vector<int> initialSlivers(layers.size(),0);
   Settings fair;fair.Iterations=1;fair.Strength=fairingStrength;fair.Parallel=parallel;
   zTsDetail::ParallelErrors setup(layers.size());
+  zTsUtils::ScopedSlicingTiming setupTiming("Height.prepareSystems");
   #pragma omp parallel for schedule(dynamic) if(parallel)
   for(int k=1;k<int(layers.size())-1;++k){try{Report local;
     if(!prepare(layers[k],side,s.Maximum,fair,work[k],local,errors[k],false))continue;
+    initialSlivers[k]=local.SliverConstrainedVertices;
+    // A thin triangle does not by itself require an immobile patch. The
+    // scalar normal system moves its supports coherently; hard trial guards
+    // still reject collapse, reversal, contact and missing transported UV.
+    work[k].fixed.assign(layers[k].Positions.size(),false);
     work[k].limit=s.MaxDisplacement>0?s.MaxDisplacement:2*s.Maximum;
+    // Height correction needs a smooth scalar offset, not free tangential
+    // mesh motion. Project each seed normal into the exact side/crease tangent
+    // space and retain that one direction throughout the correction solve.
+    for(int i=0;i<int(layers[k].Positions.size());++i){V direction=work[k].Tangents[i]*toEigenVec(layers[k].Normals[i]);
+      if(direction.norm()>1e-8){direction.normalize();work[k].Tangents[i]=direction*direction.transpose();}
+      else {work[k].Tangents[i].setZero();work[k].fixed[i]=true;}}
     std::vector<double> masses(work[k].mass.data(),work[k].mass.data()+work[k].mass.size());
     std::nth_element(masses.begin(),masses.begin()+masses.size()/2,masses.end());const double floor=.1*masses[masses.size()/2];
     for(int i=0;i<work[k].mass.size();++i)work[k].mass[i]=(std::max)(work[k].mass[i],floor);
@@ -1005,7 +1145,11 @@ bool optimizeHeightDomain(const Reference &reference,std::vector<Layer> &layers,
     surfaceSystem(layers[k],work[k],systems[k],errors[k]);
   }catch(...){setup.capture(k);}}
   setup.rethrow();for(const auto &e:errors)if(!e.empty()){error=e;return false;}
-  report.Factorizations=int(layers.size())-2;report.InitialBendingEnergy=bendingEnergy(layers,work);
+  setupTiming.stop();
+  for(size_t k=1;k+1<layers.size();++k){report.Factorizations+=systems[k].Solver?1:0;
+    report.InitialSliverVertices+=initialSlivers[k];
+    for(int dimensions:systems[k].Dimensions)report.DegreesOfFreedom+=dimensions;}
+  report.InitialBendingEnergy=bendingEnergy(layers,work);
   const auto seed=positions(layers);int stalled=0;
   std::vector<ContactGuard> contactGuards;std::set<std::tuple<int,int,int>> contactKeys;
   std::vector<std::vector<double>> multipliers(layers.size());for(size_t k=0;k<samples.size();++k)multipliers[k].assign(samples[k].size(),0);
@@ -1018,7 +1162,9 @@ bool optimizeHeightDomain(const Reference &reference,std::vector<Layer> &layers,
   for(int outer=0;outer<s.Iterations;++outer){++report.OuterIterations;
     const auto outerStart=std::chrono::steady_clock::now();
     const size_t initialContacts=contactGuards.size();
-    std::vector<Eigen::VectorXd> degrees;auto rows=heightProjections(layers,links,samples,work,side,degrees,s,!parallelPlanes,multipliers,contactGuards);if(rows.empty())break;
+    std::vector<Eigen::VectorXd> degrees;auto rows=heightProjections(layers,links,samples,work,side,degrees,s,!parallelPlanes,multipliers,contactGuards,report);if(rows.empty())break;
+    std::vector<char> active(layers.size(),0);
+    for(size_t k=1;k+1<layers.size();++k)active[k]=degrees[k].sum()>0;
     if(outer==0&&printTargets&&std::getenv("ZSPACE_CHECK_HEIGHT_GRADIENT")){
       std::vector<int> check;for(int r=0;r<int(rows.size());++r)if(rows[r].Layer>=0)check.push_back(r);
       std::sort(check.begin(),check.end(),[&](int a,int b){return bandViolation(sampleHeight(layers[rows[a].Layer],samples[rows[a].Layer][rows[a].Sample]),s)>
@@ -1029,8 +1175,12 @@ bool optimizeHeightDomain(const Reference &reference,std::vector<Layer> &layers,
         plus[term->Layer].Positions[term->Vertex]=point(toEigenVec(layers[term->Layer].Positions[term->Vertex])+epsilon*direction);
         minus[term->Layer].Positions[term->Vertex]=point(toEigenVec(layers[term->Layer].Positions[term->Vertex])-epsilon*direction);
         std::vector<char> mask(layers.size(),0);mask[row.Layer]=1;Report temp;std::string message;
-        if(refreshHeights(plus,tol,temp,message,false,nullptr,&mask)&&refreshHeights(minus,tol,temp,message,false,nullptr,&mask)){
-          const double finite=(sampleHeight(plus[row.Layer],samples[row.Layer][row.Sample])-sampleHeight(minus[row.Layer],samples[row.Layer][row.Sample]))/(2*epsilon);
+        std::vector<std::unique_ptr<Tree>> plusTrees,minusTrees;auto plusSamples=samples,minusSamples=samples;
+        if(refreshHeights(plus,tol,temp,message,false,nullptr,&mask,nullptr,&plusTrees)&&
+            refreshHeights(minus,tol,temp,message,false,nullptr,&mask,nullptr,&minusTrees)&&
+            refreshExactSamples(plus,plusSamples,plusTrees,maximumRay,tol,message,false,&mask)&&
+            refreshExactSamples(minus,minusSamples,minusTrees,maximumRay,tol,message,false,&mask)){
+          const double finite=(sampleHeight(plus[row.Layer],plusSamples[row.Layer][row.Sample])-sampleHeight(minus[row.Layer],minusSamples[row.Layer][row.Sample]))/(2*epsilon);
           std::ostringstream log;log<<"[surfaceGradientCheck] layer="<<row.Layer<<" predicted="<<term->A.norm()<<" finiteDifference="<<finite;zTsUtils::printDebug(log.str());}
       }
     }
@@ -1048,8 +1198,13 @@ bool optimizeHeightDomain(const Reference &reference,std::vector<Layer> &layers,
     // Consensus ADMM: local slab projections, independent cached surface solves,
     // then dual updates. Sparse support/orientation coefficients are frozen;
     // there is no global Jacobian matrix or Newton factorization.
-    const int innerBudget=printTargets&&(report.WorstViolation<.75||!contactGuards.empty())?80:32;
+    // Coefficients and hit supports are frozen only for a bounded batch.
+    // Persistent duals carry progress across refreshes; contact appearance
+    // must not silently multiply every later batch's sparse-solve budget.
+    constexpr int innerBudget=32;
+    zTsUtils::ScopedSlicingTiming consensusTiming("Height.consensus");
     for(int inner=0;inner<innerBudget;++inner){
+      ++report.InnerIterations;
       #pragma omp parallel for schedule(static) if(parallel)
       for(int r=0;r<int(rows.size());++r){auto &row=rows[r];double value=row.Bias,den=0;
         for(const auto &t:row.Terms){value+=t.A.dot(x[t.Layer].row(t.Vertex).transpose()+t.Dual);den+=t.A.squaredNorm()/t.Weight;}
@@ -1062,7 +1217,10 @@ bool optimizeHeightDomain(const Reference &reference,std::vector<Layer> &layers,
       for(const auto &row:rows)for(const auto &t:row.Terms)rhs[t.Layer].row(t.Vertex)+=t.Weight*(t.Z-t.Dual).transpose();
       const auto previous=x;zTsDetail::ParallelErrors solves(layers.size());
       #pragma omp parallel for schedule(dynamic) if(parallel)
-      for(int k=1;k<int(layers.size())-1;++k){try{auto &system=systems[k];if(!system.Solver)continue;
+      for(int k=1;k<int(layers.size())-1;++k){try{auto &system=systems[k];
+        // A height batch has no authority to refair a layer without active
+        // height/contact supports. Keep it exact, and avoid its sparse solves.
+        if(!active[k]||!system.Solver)continue;
         Eigen::MatrixXd b=baseRhs[k];
         for(int i=0;i<x[k].rows();++i){const int row=system.Index[i];if(row<0)continue;const double mass=work[k].mass[i];
           V target=rhs[k].row(i).transpose();if(degrees[k][i]==0)target+=consensusPenalty*mass*previous[k].row(i).transpose();
@@ -1084,20 +1242,35 @@ bool optimizeHeightDomain(const Reference &reference,std::vector<Layer> &layers,
         for(size_t k=1;k+1<layers.size();++k)change=(std::max)(change,(x[k]-previous[k]).rowwise().norm().maxCoeff());
         if(violation<.25*s.Tolerance+1e-6*s.Minimum&&change<1e-3*s.Minimum)break;}
     }
+    consensusTiming.stop();
     projectContacts(x,layers,systems,contactGuards,1e-6*s.Minimum);
-    double scale=1;for(size_t k=1;k+1<layers.size();++k)for(int i=0;i<x[k].rows();++i){const V d=x[k].row(i).transpose()-toEigenVec(layers[k].Positions[i]);
-      if(d.norm()>0)scale=(std::min)(scale,.5*s.Minimum/d.norm());}
+    // Trust limits belong to each complete layer. One ill-conditioned local
+    // proposal must not throttle every unrelated layer in the stack.
+    std::vector<double> scales(layers.size(),1);
+    for(size_t k=1;k+1<layers.size();++k)for(int i=0;i<x[k].rows();++i){const V d=x[k].row(i).transpose()-toEigenVec(layers[k].Positions[i]);
+      if(d.norm()>0)scales[k]=(std::min)(scales[k],.5*s.Minimum/d.norm());}
+    const double minimumTrust=*std::min_element(scales.begin(),scales.end());
     bool accepted=false;double acceptedLine=0;std::string rejected;std::vector<std::set<int>> blocked(layers.size()),blockedUnion(layers.size());HeightQueryFailure failedQuery;
-    for(double step=1;step>=1.0/128;step*=.5){auto trial=layers;std::vector<char> valid(layers.size(),1),moved(layers.size(),0);zTsDetail::ParallelErrors geometry(layers.size());
+    std::vector<double> lineSteps(layers.size(),1),validatedSteps(layers.size(),-1);
+    const auto reduceLayer=[&](int k){if(k<=0||k+1>=int(layers.size())||lineSteps[k]==0)return false;
+      lineSteps[k]*=.5;if(lineSteps[k]<1.0/128)lineSteps[k]=0;return true;};
+    for(int search=0;search<16;++search){++report.LineSearchTrials;
+      for(auto &ids:blockedUnion)ids.clear();failedQuery=HeightQueryFailure();
+      zTsUtils::ScopedSlicingTiming trialTiming("Height.lineSearchTrial");
+      auto trial=layers;std::vector<char> valid(layers.size(),1),moved(layers.size(),0);zTsDetail::ParallelErrors geometry(layers.size());
       std::vector<std::vector<char>> changedVertices(layers.size()),changedFaces(layers.size());
       #pragma omp parallel for schedule(dynamic) if(parallel)
       for(int k=1;k<int(layers.size())-1;++k){try{
         blocked[k].clear();changedVertices[k].assign(layers[k].Positions.size(),0);changedFaces[k].assign(layers[k].Triangles.size(),0);
         for(int i=0;i<x[k].rows();++i){if(work[k].fixed[i])continue;const V old=toEigenVec(layers[k].Positions[i]),origin=toEigenVec(work[k].original.Positions[i]);
-          const V p=side.project(old+step*scale*(x[k].row(i).transpose()-old),origin,work[k].allowed[i]);
+          const V p=side.project(old+lineSteps[k]*scales[k]*(x[k].row(i).transpose()-old),origin,work[k].allowed[i]);
           if((p-origin).norm()>work[k].limit+tol){valid[k]=0;errors[k]="Surface displacement limit reached.";break;}
           if((p-old).norm()<=tol)continue;
-          trial[k].Positions[i]=point(p);zPoint uv;if(sample(trial[k].Positions[i],&uv)&&trial[k].UV.size()==trial[k].Positions.size())trial[k].UV[i]=uv;
+          trial[k].Positions[i]=point(p);zPoint uv;
+          if(trial[k].UV.size()==trial[k].Positions.size()){
+            if(!sample(trial[k].Positions[i],&uv)){valid[k]=0;errors[k]="Transported surface UV is unavailable.";blocked[k].insert(i);break;}
+            trial[k].UV[i]=uv;
+          }
           moved[k]=1;changedVertices[k][i]=1;
         }
 
@@ -1109,7 +1282,10 @@ bool optimizeHeightDomain(const Reference &reference,std::vector<Layer> &layers,
           if(n.squaredNorm()<1e-12*old.squaredNorm()||n.dot(old)<=0){valid[k]=0;errors[k]="triangle collapse/reversal";blocked[k].insert(t.begin(),t.end());break;}}
 
       }catch(...){geometry.capture(k);}}
-      geometry.rethrow();if(std::find(valid.begin(),valid.end(),char(0))!=valid.end()){for(size_t k=1;k+1<layers.size();++k)if(!valid[k]){blockedUnion[k].insert(blocked[k].begin(),blocked[k].end());rejected=errors[k]+" on layer "+std::to_string(k);}continue;}
+      geometry.rethrow();if(std::find(valid.begin(),valid.end(),char(0))!=valid.end()){
+        bool reduced=false;for(size_t k=1;k+1<layers.size();++k)if(!valid[k]){blockedUnion[k].insert(blocked[k].begin(),blocked[k].end());
+          rejected=errors[k]+" on layer "+std::to_string(k);reduced=reduceLayer(int(k))||reduced;}
+        if(reduced)continue;break;}
 
       zTsDetail::ParallelErrors refits(layers.size());
       #pragma omp parallel for schedule(dynamic) if(parallel)
@@ -1118,12 +1294,18 @@ bool optimizeHeightDomain(const Reference &reference,std::vector<Layer> &layers,
       }catch(...){refits.capture(k);}}
       refits.rethrow();std::vector<int> order;for(int k=1;k<int(layers.size())-1;++k)if(moved[k])order.push_back(k);
       std::sort(order.begin(),order.end(),[&](int a,int b){return geometryPriority[a]!=geometryPriority[b]?geometryPriority[a]>geometryPriority[b]:a<b;});
-      bool rejectedGeometry=false;
-      for(int begin=0;begin<int(order.size())&&!rejectedGeometry;begin+=4){const int end=(std::min)(begin+4,int(order.size()));
-        #pragma omp parallel for schedule(static) if(parallel)
-        for(int j=begin;j<end;++j){const int k=order[j];try{valid[k]=validTrial(trial[k],work[k],side,sample,tol,errors[k],blocked[k],&changedVertices[k],&changedFaces[k],trialTrees[k].get());}catch(...){geometry.capture(k);}}
-        geometry.rethrow();for(int j=begin;j<end;++j)if(!valid[order[j]]){++geometryPriority[order[j]];blockedUnion[order[j]].insert(blocked[order[j]].begin(),blocked[order[j]].end());rejected=errors[order[j]]+" on layer "+std::to_string(order[j]);rejectedGeometry=true;}}
-      if(rejectedGeometry)continue;
+      // A source/self-contact test depends only on this layer's candidate.
+      // Reuse its successful validation while another layer backtracks.
+      #pragma omp parallel for schedule(dynamic) if(parallel)
+      for(int j=0;j<int(order.size());++j){const int k=order[j];try{
+        if(validatedSteps[k]==lineSteps[k])continue;
+        valid[k]=validTrial(trial[k],work[k],side,sample,tol,errors[k],blocked[k],&changedVertices[k],&changedFaces[k],trialTrees[k].get());
+        if(valid[k])validatedSteps[k]=lineSteps[k];
+      }catch(...){geometry.capture(k);}}
+      geometry.rethrow();bool rejectedGeometry=false,reducedGeometry=false;
+      for(int k:order)if(!valid[k]){++geometryPriority[k];blockedUnion[k].insert(blocked[k].begin(),blocked[k].end());
+        rejected=errors[k]+" on layer "+std::to_string(k);rejectedGeometry=true;reducedGeometry=reduceLayer(k)||reducedGeometry;}
+      if(rejectedGeometry){if(reducedGeometry)continue;break;}
       std::vector<char> crossed(layers.size()-1,0);std::vector<std::pair<int,int>> contactFaces(layers.size()-1,{-1,-1});zTsDetail::ParallelErrors separation(layers.size()-1);
       #pragma omp parallel for schedule(dynamic) if(parallel)
       for(int k=0;k<int(layers.size())-1;++k){try{if(moved[k]||moved[k+1])crossed[k]=!separatedTrees(*trialTrees[k],*trialTrees[k+1],tol,&contactFaces[k]);}catch(...){separation.capture(k);}}
@@ -1139,24 +1321,51 @@ bool optimizeHeightDomain(const Reference &reference,std::vector<Layer> &layers,
           axis(a.normal());axis(b.normal());for(int i=0;i<3;++i)for(int j=0;j<3;++j)axis((a.p[(i+1)%3]-a.p[i]).cross(b.p[(j+1)%3]-b.p[j]));
           if(gap>tol){ContactGuard guard;guard.Layer=k;guard.FaceA=pair.first;guard.FaceB=pair.second;
             guard.Normal=normal;guard.Minimum=(std::max)(4*tol,(std::min)(.1*s.Minimum,.25*gap));contactGuards.push_back(guard);}}
-        rejected="Neighbouring surfaces intersect.";continue;}
+        bool reduced=false;std::vector<char> collisionLayers(layers.size(),0);
+        for(int k=0;k<int(crossed.size());++k)if(crossed[k])collisionLayers[k]=collisionLayers[k+1]=1;
+        for(int k=1;k<int(collisionLayers.size())-1;++k)if(collisionLayers[k])reduced=reduceLayer(k)||reduced;
+        rejected="Neighbouring surfaces intersect.";if(reduced)continue;break;}
       std::vector<char> affected(layers.size(),0);for(int k=0;k<int(layers.size());++k)if(moved[k])
         for(int j=(std::max)(0,k-1);j<=(std::min)(int(layers.size())-1,k+1);++j)affected[j]=1;
       HeightLinks nextLinks=links;Report measured;std::string queryError;
-      if(!refreshHeights(trial,tol,measured,queryError,parallel,&nextLinks,&affected,&failedQuery,&trees)){rejected=queryError;continue;}
-      HeightReport next=report;const double nextScore=heightScore(trial,samples,s,next);
-      if(next.Converged||nextScore<score*(1-1e-7)){
+      if(!refreshHeights(trial,tol,measured,queryError,parallel,&nextLinks,&affected,&failedQuery,&trialTrees,true)){
+        rejected=queryError;const bool a=reduceLayer(failedQuery.LayerId),b=reduceLayer(failedQuery.Adjacent);
+        if(a||b)continue;break;}
+      auto nextSamples=samples;
+      if(!refreshExactSamples(trial,nextSamples,trialTrees,maximumRay,tol,queryError,parallel,&affected,&failedQuery)){
+        rejected=queryError;const bool a=reduceLayer(failedQuery.LayerId),b=reduceLayer(failedQuery.Adjacent);
+        if(a||b)continue;break;}
+      HeightReport next=report;const double nextScore=heightScore(trial,nextSamples,s,next);
+      // Never buy aggregate least-squares progress by worsening the largest
+      // physical TCP violation or creating a new near-contact gap.
+      double previousGap=inf;for(const auto &layer:links)for(const auto &vertex:layer)for(const auto &hit:vertex)previousGap=(std::min)(previousGap,hit.Height);
+      const double gapFloor=(std::min)(previousGap,.1*s.Minimum);bool nearContact=false,reducedContact=false;std::vector<char> contactLayers(layers.size(),0);
+      for(int k=0;k<int(nextLinks.size());++k)for(const auto &vertex:nextLinks[k])for(const auto &hit:vertex)
+        if(hit.Height+tol<gapFloor){nearContact=true;contactLayers[k]=contactLayers[hit.LayerId]=1;}
+      const double targetFloor=(std::min)(report.Minimum,.1*s.Minimum);
+      for(int k=1;k<int(nextSamples.size());++k)for(const auto &sample:nextSamples[k])
+        if(sampleHeight(trial[k],sample)+tol<targetFloor){nearContact=true;contactLayers[k]=contactLayers[k-1]=1;}
+      for(int k=1;k<int(contactLayers.size())-1;++k)if(contactLayers[k])reducedContact=reduceLayer(k)||reducedContact;
+      if(nearContact){rejected="Surface update creates a new near-contact gap.";if(reducedContact)continue;break;}
+      const bool preservesWorst=next.WorstViolation<=report.WorstViolation+1e-7*s.Maximum;
+      if(preservesWorst&&(next.Converged||nextScore<score*(1-1e-7))){
         const double improvement=(score-nextScore)/(std::max)(score,1e-30);stalled=improvement<1e-4?stalled+1:0;
-        layers.swap(trial);links.swap(nextLinks);score=nextScore;report=next;++report.AcceptedIterations;accepted=true;acceptedLine=step;
+        layers.swap(trial);links.swap(nextLinks);samples.swap(nextSamples);score=nextScore;report=next;++report.AcceptedIterations;accepted=true;
+        acceptedLine=1;for(size_t k=1;k+1<lineSteps.size();++k)if(lineSteps[k]>0)acceptedLine=(std::min)(acceptedLine,lineSteps[k]);
+        directedGaps();
         // Transport scalar constraint forces across frozen-coefficient batches.
         // Resetting them every outer iteration turns a hard bound into a weak
         // finite-iteration penalty and stalls before the requested domain.
         for(const auto &row:rows){if(row.Layer<0)continue;double force=0,norm=0;for(const auto &t:row.Terms){force+=t.Weight*t.A.dot(t.Dual);norm+=t.A.squaredNorm();}
-          if(norm>0){const double nextMultiplier=force/norm;auto &old=multipliers[row.Layer][row.Sample];old+=step*scale*(nextMultiplier-old);}}
+          if(norm>0){const double nextMultiplier=force/norm;auto &old=multipliers[row.Layer][row.Sample];
+            double trust=1;for(const auto &term:row.Terms)trust=(std::min)(trust,lineSteps[term.Layer]*scales[term.Layer]);
+            old+=trust*(nextMultiplier-old);}}
         break;}
       rejected="Frozen-normal surface update did not reduce measured height error.";
+      bool reduced=false;for(int k=1;k<int(layers.size())-1;++k)reduced=reduceLayer(k)||reduced;
+      if(!reduced)break;
     }
-    if(!accepted||acceptedLine<=1.0/32){bool changed=false;
+    if(!accepted){bool changed=false;
       for(size_t k=1;k+1<layers.size();++k)blocked[k].insert(blockedUnion[k].begin(),blockedUnion[k].end());
       const auto freezeRing=[&](int layer,int id){if(layer<=0||layer+1>=int(layers.size())||id<0)return;
         blocked[layer].insert(id);for(const auto &tri:layers[layer].Triangles)if(std::find(tri.begin(),tri.end(),id)!=tri.end())blocked[layer].insert(tri.begin(),tri.end());};
@@ -1169,13 +1378,15 @@ bool optimizeHeightDomain(const Reference &reference,std::vector<Layer> &layers,
       if(!accepted&&contactGuards.size()>initialContacts)continue;
       if(!accepted){report.LastRejectedReason=rejected.empty()?"Surface optimization stagnated.":rejected;break;}}
     {std::ostringstream message;message<<"[surfaceIteration] outer="<<report.OuterIterations<<" constraints="<<rows.size()<<" domain=["<<report.Minimum<<","<<report.Maximum
-      <<"] violations="<<report.ViolatingVertices<<" step="<<acceptedLine<<" trust="<<scale<<" ms="<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-outerStart).count();zTsUtils::printDebug(message.str());}
+      <<"] violations="<<report.ViolatingVertices<<" uncontrollable="<<report.UncontrollableSamples
+      <<" step="<<acceptedLine<<" minimumLayerTrust="<<minimumTrust<<" ms="<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-outerStart).count();zTsUtils::printDebug(message.str());}
     if(report.Converged)break;if(stalled>=5){report.LastRejectedReason="Surface optimization stagnated.";break;}
   }
   for(size_t k=1;k+1<layers.size();++k)for(size_t i=0;i<layers[k].Positions.size();++i){const V p=toEigenVec(layers[k].Positions[i]);
     report.MaxDisplacement=(std::max)(report.MaxDisplacement,(p-toEigenVec(work[k].original.Positions[i])).norm());
     if(!work[k].allowed[i].empty()){int t;V q;report.MaxBoundaryError=(std::max)(report.MaxBoundaryError,side.tree.nearest(p,t,q));}}
   report.FinalBendingEnergy=bendingEnergy(layers,work);
+  for(size_t k=1;k+1<work.size();++k)report.FixedVertices+=int(std::count(work[k].fixed.begin(),work[k].fixed.end(),true));
   if(!report.Converged&&report.LastRejectedReason.empty())report.LastRejectedReason="Surface iteration budget exhausted; domain not yet achieved.";
   if(report.Converged)report.LastRejectedReason.clear();finish();return true;
 }

@@ -97,10 +97,10 @@ bool HarmonicSlicer::relaxContours(std::string &error, bool useParallel) {
   settings.Iterations=i_Settings._HIsoRelaxIterations;
   settings.Strength=i_Settings._HIsoRelaxStrength;
   settings.MaxDeviation=i_Settings._HIsoRelaxMaxDeviation;
-  // Sliver preconditioning belongs to the optional surface-height solver.
-  // Iso-value redistribution alone keeps the ordinary relaxation mesh.
-  if(i_Settings.HPrintHeight.Enabled&&i_Settings.HPrintHeight.OptimizeSurfaces)
-    settings.MinEdgeLength=.05*i_Settings.HPrintHeight.Minimum;
+  // Preserve the extracted material mesh in both height modes. Automatically
+  // repairing edges at 5% of the requested height changed recovered normals
+  // and could invalidate otherwise usable adjacent-layer height queries.
+  // Explicit quality preconditioning remains available through zTsRelax.
   settings.Parallel=useParallel;
   zTsRelax::Reference reference;reference.Positions=_Tet.Surface.Positions;reference.Triangles=_Tet.Surface.Triangles;
   for(int face:_Tet.SurfaceFaceIds)reference.WidthIds.push_back(_Tet.FaceTags[face]==HarmonicField::TetFaceTag::Side?_Tet.FaceGroupIds[face]:-1);
@@ -127,12 +127,14 @@ bool HarmonicSlicer::relaxContours(std::string &error, bool useParallel) {
   zTsUtils::printDebug(report.str());return prepareBottomPrintNormals(o_IsoMeshes,o_VertexLayerNormals,error);
 }
 
-bool HarmonicSlicer::optimizeSurfaceHeightDomain(const std::vector<zPointArray> *targets,std::string &error,bool parallel){
+bool HarmonicSlicer::optimizeSurfaceHeightDomain(const std::vector<zPointArray> *targets,std::string &error,bool parallel,int iterationBudget,double displacementBudget){
   zTsUtils::ScopedSlicingTiming methodTiming("HarmonicSlicer.optimizeSurfaceHeightDomain");
   zTsRelax::Reference reference;reference.Positions=_Tet.Surface.Positions;reference.Triangles=_Tet.Surface.Triangles;
   for(int face:_Tet.SurfaceFaceIds)reference.WidthIds.push_back(_Tet.FaceTags[face]==HarmonicField::TetFaceTag::Side?_Tet.FaceGroupIds[face]:-1);
   auto layers=relaxationLayers();TetSampler sampler(_Tet);
   auto settings=i_Settings.HPrintHeight;
+  if(iterationBudget>0)settings.Iterations=(std::min)(settings.Iterations,iterationBudget);
+  if(displacementBudget>0)settings.MaxDisplacement=(std::min)(settings.MaxDisplacement>0?settings.MaxDisplacement:2*settings.Maximum,displacementBudget);
   if(!targets)settings.Iterations=(std::min)(settings.Iterations,8);
   else if(settings.Tolerance>0){
     // Keep a small guide margin for float storage and a rebuilt chart. Final
@@ -144,7 +146,11 @@ bool HarmonicSlicer::optimizeSurfaceHeightDomain(const std::vector<zPointArray> 
   for(size_t k=0;k<layers.size();++k){if(k>0&&k+1<layers.size())zFnMesh(o_IsoMeshes[k]).setVertexPositions(layers[k].Positions);
     o_IsoMeshUV[k].swap(layers[k].UV);o_VertexLayerHeights[k].swap(layers[k].Heights);o_VertexLayerNormals[k].swap(layers[k].Normals);}
   const auto &h=_PrintHeightOptimizationReport;std::ostringstream message;message<<"[surfaceHeightOptimizer] iterations="<<h.AcceptedIterations<<" factors="<<h.Factorizations<<" domain=["<<h.Minimum<<","<<h.Maximum
-    <<"] violations="<<h.ViolatingVertices<<" worst="<<h.WorstViolation<<" timeMs="<<h.Milliseconds<<" constrained="<<h.LastRejectedReason;
+    <<"] violations="<<h.ViolatingVertices<<" worst="<<h.WorstViolation<<" timeMs="<<h.Milliseconds
+    <<" unknowns="<<h.DegreesOfFreedom<<" innerIterations="<<h.InnerIterations<<" lineTrials="<<h.LineSearchTrials
+    <<" fixedVertices="<<h.FixedVertices<<" uncontrollableSamples="<<h.UncontrollableSamples
+    <<" unavailableAuxiliaryGaps="<<h.UnavailableAuxiliaryGaps
+    <<" directedGaps=["<<h.MinimumDirectedGap<<","<<h.MaximumDirectedGap<<"] constrained="<<h.LastRejectedReason;
   zTsUtils::printDebug(message.str());return prepareBottomPrintNormals(o_IsoMeshes,o_VertexLayerNormals,error);
 }
 } // namespace zSpace

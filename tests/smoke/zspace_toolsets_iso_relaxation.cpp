@@ -126,9 +126,15 @@ void heightDomain() {
   require(optimizeHeightDomain(reference,layers,settings,inside,false,report,error),error);
   std::cout<<"height domain "<<report.InitialMinimum<<","<<report.InitialMaximum<<" -> "<<report.Minimum<<","<<report.Maximum<<" iterations="<<report.AcceptedIterations<<'\n';
   require(report.Converged,"Feasible planar height domain did not converge");
+  require(report.DegreesOfFreedom>0&&report.DegreesOfFreedom<=75,
+          "Height correction did not use a reduced scalar surface system");
+  require(report.InnerIterations>0&&report.LineSearchTrials>=report.AcceptedIterations,
+          "Height solver iteration diagnostics are incomplete");
+  require(report.MinimumDirectedGap>0&&report.MaximumDirectedGap>=report.MinimumDirectedGap,
+          "Directed geometric gap diagnostics are invalid");
   for(size_t k=0;k<layers.size();++k){require(layers[k].Triangles==original[k].Triangles,"Height correction changed topology");
     if(k==0||k+1==layers.size())for(size_t i=0;i<layers[k].Positions.size();++i)require(norm(layers[k].Positions[i],original[k].Positions[i])==0,"Height optimizer moved a cap");
-    if(k+1<layers.size())for(float h:layers[k].Heights)require(h>=6&&h<=12,"Successful height outside supplied domain");
+    if(k>0)for(float h:layers[k].Heights)require(h>=6&&h<=12,"Successful TCP previous-layer height outside supplied domain");
     require(bending(layers[k])<1e-5,"Constant-height correction introduced surface ripples");
   }
   auto repeat=original;HeightReport parallelReport;
@@ -182,21 +188,112 @@ void qualityRepair() {
 void heightGeometryCases(){
   for(bool narrow:{false,true}){
     auto reference=box();auto layers=stack(false);const double level[5]={0,5,17,29,40};
-    for(auto &p:reference.Positions){p.z*=20;if(narrow)p.x*=.025f;else p.z*=1+.02f*p.x;}
-    for(int k=0;k<5;++k)for(auto &p:layers[k].Positions){p.z=float(level[k]);if(narrow)p.x*=.025f;else p.z*=1+.02f*p.x;}
-    const auto original=layers;const auto inside=[&](const zPoint &p,zPoint *uv){const double width=narrow?.1:4,top=narrow?40:40*(1+.02*p.x);
+    for(auto &p:reference.Positions){p.z*=20;if(narrow)p.x*=.025f;else p.z*=1+.002f*p.x;}
+    for(int k=0;k<5;++k)for(auto &p:layers[k].Positions){p.z=float(level[k]);if(narrow)p.x*=.025f;else p.z*=1+.002f*p.x;}
+    const auto original=layers;const auto inside=[&](const zPoint &p,zPoint *uv){const double width=narrow?.1:4,top=narrow?40:40*(1+.002*p.x);
       if(p.x<-1e-6||p.x>width+1e-6||p.y<-1e-6||p.y>4+1e-6||p.z<-1e-6||p.z>top+1e-5)return false;
       if(uv)*uv=zPoint(p.x/width,p.y/4,p.z/top);return true;};
     PrintHeightOptimizationSettings settings;settings.Enabled=true;settings.Tolerance=.05;settings.Iterations=32;
-    std::vector<zPointArray> targets;for(size_t k=0;k+1<layers.size();++k)targets.push_back(layers[k].Positions);
+    // Printed supports lie inside the trim. A steeper 0.8 top slope on this
+    // 4 mm wide, 40 mm tall prism has no previous-layer ray support; the old
+    // plane-extrapolated fixture was not a physically feasible TCP case.
+    const int materialIds[]={6,7,8,11,12,13,16,17,18};
+    std::vector<zPointArray> targets(layers.size()-1);
+    for(size_t k=1;k<layers.size();++k)for(int id:materialIds)targets[k-1].push_back(layers[k].Positions[id]);
     HeightReport report;std::string error;require(optimizeHeightDomain(reference,layers,settings,inside,false,report,error,&targets),error);
+    std::cout<<(narrow?"narrow":"tilted")<<" height: domain="<<report.Minimum<<","<<report.Maximum
+             <<" directed="<<report.MinimumDirectedGap<<","<<report.MaximumDirectedGap
+             <<" bending="<<report.InitialBendingEnergy<<" -> "<<report.FinalBendingEnergy
+             <<" dofs="<<report.DegreesOfFreedom<<" ms="<<report.Milliseconds<<'\n';
     require(report.Converged,narrow?"Narrow stack failed height convergence":"Tilted-cap stack failed height convergence");
     for(size_t k=0;k<layers.size();++k){if(k==0||k+1==layers.size())for(size_t i=0;i<layers[k].Positions.size();++i)
         require(norm(layers[k].Positions[i],original[k].Positions[i])==0,"Geometry-case cap moved");
-      if(k+1<layers.size())for(float height:layers[k].Heights)require(height>=5.95&&height<=12.05,"Geometry case contains an unmeasured domain violation");}
+    }
+    std::vector<zVectorArray> targetNormals(targets.size());
+    for(size_t k=1;k<layers.size();++k){targets[k-1].clear();for(int id:materialIds){
+      targets[k-1].push_back(layers[k].Positions[id]);targetNormals[k-1].push_back(layers[k].Normals[id]);}}
+    std::vector<zFloatArray> actual;require(measureTargetHeights(layers,targets,targetNormals,actual,error,false),error);
+    for(const auto &layer:actual)for(float height:layer)require(height>=5.95&&height<=12.05,"Geometry case contains an unmeasured actual TCP-gap violation");
   }
   auto bad=stack(false);bad[2].Triangles[0][1]=bad[2].Triangles[0][0];PrintHeightOptimizationSettings settings;settings.Enabled=true;
   HeightReport report;std::string error;require(!optimizeHeightDomain(box(),bad,settings,sample,false,report,error),"Degenerate height-support triangle accepted");
 }
+void heightMissingTransport() {
+  auto reference=box();for(auto &p:reference.Positions)p.z*=20;
+  auto layers=stack(false);const double level[5]={0,5,10,27,40};
+  for(int k=0;k<5;++k)for(auto &p:layers[k].Positions)p.z=float(level[k]);
+  const auto original=layers;
+  const auto inside=[](const zPoint &p,zPoint *uv){
+    if(p.x<0||p.x>4||p.y<0||p.y>4||p.z<0||p.z>40)return false;
+    if(uv){if(p.x>2.3)return false;*uv=zPoint(p.x/4,p.y/4,p.z/40);}return true;};
+  PrintHeightOptimizationSettings settings;settings.Enabled=true;settings.Iterations=4;
+  HeightReport report;std::string error;
+  require(optimizeHeightDomain(reference,layers,settings,inside,false,report,error),error);
+  for(size_t k=1;k+1<layers.size();++k)for(size_t i=0;i<layers[k].Positions.size();++i)
+    if(original[k].Positions[i].x>=3)
+      require(norm(layers[k].Positions[i],original[k].Positions[i])==0,
+              "Height correction moved a point without transported UV");
+  require(!report.Converged,"Unavailable transported coordinates were reported as a feasible height correction");
 }
-int main() {try{relaxation();flatAndDisabled();constrainedInput();heightDomain();qualityRepair();heightGeometryCases();return 0;}catch(const std::exception &e){std::cerr<<e.what()<<'\n';return 1;}}
+void inactiveHeightLayers() {
+  auto layers=stack(false);
+  for(auto &p:layers[3].Positions)p.z+=float(.02*std::sin(p.x*3.141592653589793/4)*std::sin(p.y*3.141592653589793/4));
+  const auto original=layers;
+  std::vector<zPointArray> targets(layers.size()-1);targets[0]=layers[1].Positions;
+  PrintHeightOptimizationSettings settings;settings.Enabled=true;settings.Minimum=.6;settings.Maximum=.75;settings.Tolerance=.001;
+  HeightReport report;std::string error;
+  require(optimizeHeightDomain(box(),layers,settings,sample,false,report,error,&targets),error);
+  require(report.Converged,"Local cap-to-first-layer correction did not converge");
+  for(size_t k=2;k<layers.size();++k)for(size_t i=0;i<layers[k].Positions.size();++i)
+    require(norm(layers[k].Positions[i],original[k].Positions[i])==0,
+            "A height batch moved an unrelated layer without active supports");
+  auto parallel=original;HeightReport parallelReport;
+  require(optimizeHeightDomain(box(),parallel,settings,sample,true,parallelReport,error,&targets),error);
+  require(parallelReport.Converged,"Parallel local height correction did not converge");
+  for(size_t k=0;k<layers.size();++k)for(size_t i=0;i<layers[k].Positions.size();++i)
+    require(norm(layers[k].Positions[i],parallel[k].Positions[i])==0,
+            "Local height correction changed under parallel execution");
+}
+void previousLayerMeasurement() {
+  for(bool rotated:{false,true}){
+    auto reference=box();auto layers=stack(false);const double levels[5]={0,.2,.9,1.2,2};
+    for(int k=0;k<5;++k)for(auto &p:layers[k].Positions)p.z=float(levels[k]);
+    const auto rotate=[](const zPoint &p){return zPoint(-p.z,p.y,p.x);};
+    if(rotated){for(auto &p:reference.Positions)p=rotate(p);
+      for(auto &layer:layers)for(auto &p:layer.Positions)p=rotate(p);}
+    const auto inside=[&](const zPoint &p,zPoint *uv){return sample(rotated?zPoint(p.z,p.y,-p.x):p,uv);};
+    const auto original=layers;PrintHeightOptimizationSettings settings;settings.Enabled=true;settings.Minimum=.1;settings.Maximum=1;
+    HeightReport report;std::string error;require(optimizeHeightDomain(reference,layers,settings,inside,false,report,error),error);
+    require(report.Converged&&report.AcceptedIterations==0,"Feasible previous-layer gaps were changed");
+    for(size_t k=1;k<layers.size();++k)for(size_t i=0;i<layers[k].Heights.size();++i){
+      require(std::abs(layers[k].Heights[i]-(levels[k]-levels[k-1]))<3e-6,
+              "TCP height averaged neighboring gaps or assumed world +Z");
+      require(norm(layers[k].Positions[i],original[k].Positions[i])==0,
+              "Height measurement moved an existing TCP surface");}
+    require(std::abs(report.Minimum-.2)<3e-6&&std::abs(report.Maximum-.8)<3e-6,
+            "TCP height report included substrate proxy or omitted the top TCP");
+  }
+}
+void exactTCPRays() {
+  auto layers=stack(false);for(auto &layer:layers)for(auto &p:layer.Positions)p.x*=10;
+  std::vector<zPointArray> targets(layers.size()-1);std::vector<zVectorArray> directions(targets.size());
+  targets[0]={{20,2,.5}};directions[0]={{float(std::sqrt(.99)),0,.1f}};
+  std::vector<zFloatArray> measured,parallel;std::string error;
+  require(measureTargetHeights(layers,targets,directions,measured,error,false),error);
+  require(measured[0].size()==1&&std::abs(measured[0][0]-5)<2e-5,
+          "TCP ray used nodal spacing or stopped at four nearest distances");
+  require(measureTargetHeights(layers,targets,directions,parallel,error,true),error);
+  require(measured==parallel,"Parallel exact TCP heights changed");
+  directions[0][0]=zVector(0,0,.25f);
+  require(measureTargetHeights(layers,targets,directions,measured,error,false)&&std::abs(measured[0][0]-.5)<1e-6,
+          "A scaled valid TCP axis changed its physical height");
+  directions[0][0]=zVector(1,0,0);
+  require(!measureTargetHeights(layers,targets,directions,measured,error,false)&&measured.empty(),
+          "Unsupported horizontal TCP ray was extrapolated or retained stale heights");
+  directions[0][0]=zVector(0,0,-1);
+  require(!measureTargetHeights(layers,targets,directions,measured,error,false),"Reversed TCP ray acquired previous support");
+  directions[0][0]=zVector(0,0,1);targets[0][0].z=.6f;
+  require(!measureTargetHeights(layers,targets,directions,measured,error,false),"Off-section TCP target accepted");
+}
+}
+int main() {try{relaxation();flatAndDisabled();constrainedInput();heightDomain();qualityRepair();heightGeometryCases();heightMissingTransport();inactiveHeightLayers();previousLayerMeasurement();exactTCPRays();return 0;}catch(const std::exception &e){std::cerr<<e.what()<<'\n';return 1;}}

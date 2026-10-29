@@ -261,7 +261,8 @@ ZSPACE_INLINE bool HarmonicSlicer::computeFieldImpl(bool useParallel) {
         o_TrackFields[k].assign(gridVertexCount, 0.0);
         continue;
       }
-      const bool isEven = (k % 2 == 0);
+      const int printLayer=(std::max)(0,k-getPrintSectionOffset());
+      const bool isEven = (printLayer % 2 == 0);
       const zIntArray &edgeIds = o_IsoMeshBoundaryWidthId[k];
 
       // Distances use every actual side edge, including open components.
@@ -303,7 +304,7 @@ ZSPACE_INLINE bool HarmonicSlicer::computeFieldImpl(bool useParallel) {
 
       if (zFnGraph(o_BracingGraphs2D[k]).numEdges() > 0)
         if (!zTsField::appendBracingSegments(o_BracingGraphs2D[k], i_Settings,
-              i_Settings.BracingSlot, segments, k)) continue;
+              i_Settings.BracingSlot, segments, printLayer)) continue;
 
       if (std::any_of(i_FaceTags.begin(), i_FaceTags.end(), [](int t){ return t > 3; })) {
         auto &source = o_FaceTagSources[k]; source.boundary = boundary2D;
@@ -379,9 +380,10 @@ ZSPACE_INLINE bool HarmonicSlicer::computePrintPathImpl(bool useParallel) {
       return false;
     }
   }
-  // Retain the fixed top reference mesh, but omit the coincident print layer.
+  // TCP targets are bead tops. Section zero supports the first deposited
+  // layer; the exact top cap is the final TCP section.
   const int printedLayers=n-1;
-  if(printedLayers<1){_Status="failed: no printable layers below the top cap.";return false;}
+  if(printedLayers<1){_Status="failed: no printable TCP layers above the substrate.";return false;}
   o_PrintPaths2D.resize(printedLayers);
   o_PrintPaths3D.resize(printedLayers);
   std::vector<char> failed(n, 0);
@@ -392,18 +394,19 @@ ZSPACE_INLINE bool HarmonicSlicer::computePrintPathImpl(bool useParallel) {
 #pragma omp parallel for schedule(dynamic) if(useParallel)
   for (int k = 0; k < printedLayers; ++k) {
     try {
-      if (!zTsField::extractPrintPaths(o_ScalarField, o_PathFields[k], o_WidthFields[k],
-                                      o_TrackFields[k], o_PrintPaths2D[k], k, &pathDebug[k])) {
+      const int section=k+getPrintSectionOffset();
+      if (!zTsField::extractPrintPaths(o_ScalarField, o_PathFields[section], o_WidthFields[section],
+                                      o_TrackFields[section], o_PrintPaths2D[k], k, &pathDebug[k])) {
         failed[k] = 1;
         continue;
       }
-      if (k<int(o_FaceTagSources.size()) && !o_FaceTagSources[k].edgeTags.empty()) {
-        const zTsField::FaceTagQuery query(o_FaceTagSources[k]);
+      if (section<int(o_FaceTagSources.size()) && !o_FaceTagSources[section].edgeTags.empty()) {
+        const zTsField::FaceTagQuery query(o_FaceTagSources[section]);
         for(auto &path:o_PrintPaths2D[k])if(!zTsField::labelFaceTagSegments(path,query))throw std::runtime_error("Invalid FaceTag provenance");
       }
-      if (!zTsField::mapPrintPaths(o_PrintPaths2D[k], o_IsoMeshes2D[k], o_IsoMeshes[k],
-                                  &o_VertexLayerHeights[k], o_PrintPaths3D[k], k,
-                                  &o_VertexLayerNormals[k])) failed[k] = 1;
+      if (!zTsField::mapPrintPaths(o_PrintPaths2D[k], o_IsoMeshes2D[section], o_IsoMeshes[section],
+                                  &o_VertexLayerHeights[section], o_PrintPaths3D[k], k,
+                                  &o_VertexLayerNormals[section])) failed[k] = 1;
     } catch (...) { parallelErrors3.capture(k); }
   }
   parallelErrors3.rethrow();
@@ -416,7 +419,7 @@ ZSPACE_INLINE bool HarmonicSlicer::computePrintPathImpl(bool useParallel) {
   std::string failedLayers;
   for (int k = 0; k < n; ++k)
     if (failed[k]) failedLayers += (failedLayers.empty() ? "" : ",") + std::to_string(k);
-  _Status = "Processed print paths for " + std::to_string(n) + " layers.";
+  _Status = "Processed print paths for " + std::to_string(printedLayers) + " TCP layers.";
   if (!failedLayers.empty()) {
     _Status += " Extraction or mapping failed on layer(s): " + failedLayers;
     return false;

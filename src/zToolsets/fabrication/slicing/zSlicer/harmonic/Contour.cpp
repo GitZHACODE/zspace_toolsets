@@ -632,10 +632,9 @@ ZSPACE_INLINE bool HarmonicSlicer::computeContours(bool useParallel) {
     printDebug("[computeContours] " + _Status);
     return false;
   }
-  if(i_Settings.HPrintHeight.Enabled&&i_Settings.HPrintHeight.OptimizeSurfaces){
-    std::string error;if(!optimizeSurfaceHeightDomain(nullptr,error,useParallel)){
-      _Status="computeContours failed: surface height optimization: "+error;return false;}
-  }
+  // Correct actual TCP footprint heights after path extraction. A blind nodal
+  // pre-pass here spends iterations on unprinted geometry and can make the
+  // eventual footprint worse before its constraints are even available.
   zTsDetail::ParallelErrors parallelUnroll(numLayers);
   #pragma omp parallel for schedule(dynamic) if(useParallel)
   for (int k = 0; k < numLayers; ++k) {

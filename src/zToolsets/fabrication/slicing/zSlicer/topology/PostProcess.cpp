@@ -73,9 +73,22 @@ ZSPACE_INLINE bool TopologySlicer::computePostProcess(const PrintSynSetting &set
 ZSPACE_INLINE bool TopologySlicer::computePostProcessImpl(const PrintSynSetting &settings, bool useParallel) {
   if (!computePrintPath(useParallel)) return false;
 
-  const bool ok = zPrintSyn::computePipeline(o_IsoMeshes2D, o_IsoMeshes, &_VLength,
+  const int offset = getPrintSectionOffset();
+  if (offset < 0 || size_t(offset) >= o_IsoMeshes.size() ||
+      o_IsoMeshes2D.size() != o_IsoMeshes.size() ||
+      o_FaceTagSources.size() != o_IsoMeshes.size()) {
+    _Status = "failed: inconsistent printable TCP section window.";
+    return false;
+  }
+  // Section zero is the substrate. Every path uses the matching section above
+  // it, including the exact top section, with provenance sliced in lockstep.
+  const zObjMeshArray charts(o_IsoMeshes2D.begin() + offset, o_IsoMeshes2D.end());
+  const zObjMeshArray sections(o_IsoMeshes.begin() + offset, o_IsoMeshes.end());
+  const std::vector<zTsField::FaceTagSource> sources(o_FaceTagSources.begin() + offset,
+                                                  o_FaceTagSources.end());
+  const bool ok = zPrintSyn::computePipeline(charts, sections, &_VLength,
       zPrintSyn::SeamMapping::SharedTopology, settings, o_PrintPaths2D, o_PrintPaths3D,
-      o_ResultantPrintPath, _Status, useParallel, nullptr, nullptr, &o_FaceTagSources);
+      o_ResultantPrintPath, _Status, useParallel, nullptr, nullptr, &sources);
   if (!ok) zTsUtils::printDebug("[computePostProcessImpl] Post-processing stopped because a helper failed or reported invalid paths; partial results are retained.");
   return ok;
 }

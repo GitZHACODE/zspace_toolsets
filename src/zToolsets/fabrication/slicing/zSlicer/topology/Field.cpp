@@ -191,6 +191,7 @@ ZSPACE_INLINE bool TopologySlicer::computeFieldImpl(bool useParallel) {
 #pragma omp parallel for schedule(dynamic) if(useParallel)
   for (int l = 0; l < totalLayers; l++) {
     try {
+      const int printLayer = (std::max)(0, l - getPrintSectionOffset());
       zObjGraph unrollBracingGraph;
       bool hasValidBracing = false;
       if (l < int(o_BracingGraphs2D.size())) {
@@ -217,14 +218,14 @@ ZSPACE_INLINE bool TopologySlicer::computeFieldImpl(bool useParallel) {
         zTsField::LoopAnchor layerAnchor;
         if (zTsField::locateLoopAnchor(layerLoop2D, slotPoints2D[l],
                                        layerAnchor, &layerLoop3D))
-          zTsField::createParitySlot(layerLoop2D, layerAnchor, l % 2 == 0,
+          zTsField::createParitySlot(layerLoop2D, layerAnchor, printLayer % 2 == 0,
                                      i_Settings.SlotOffset * slotWidth,
                                      slotWidth, boundarySlot);
       }
 
       if (hasValidBracing) {
         if (!zTsField::appendBracingSegments(unrollBracingGraph, i_Settings,
-              i_Settings.BracingSlot, segmentGraphs, l)) continue;
+              i_Settings.BracingSlot, segmentGraphs, printLayer)) continue;
       }
 
       if (std::any_of(i_FaceTags.begin(), i_FaceTags.end(), [](int t){ return t > 3; })) {
@@ -387,9 +388,9 @@ ZSPACE_INLINE bool TopologySlicer::computePrintPathImpl(bool useParallel) {
     zTsUtils::printDebug("[computePrintPathImpl] " + _Status);
     return false;
   }
-  // Keep the exact top mesh as a slicing/reference constraint, not a print layer.
+  // The bottom section supports deposition; print TCP sections through the top.
   const int printedLayers=n-1;
-  if(printedLayers<1){_Status="failed: no printable layers below the top cap.";return false;}
+  if(printedLayers<1){_Status="failed: no printable TCP layers above the substrate.";return false;}
   o_PrintPaths2D.resize(printedLayers);
   o_PrintPaths3D.resize(printedLayers);
   std::vector<char> failed(n, 0);
@@ -400,17 +401,18 @@ ZSPACE_INLINE bool TopologySlicer::computePrintPathImpl(bool useParallel) {
 #pragma omp parallel for schedule(dynamic) if(useParallel)
   for (int k = 0; k < printedLayers; ++k) {
     try {
-      if (!zTsField::extractPrintPaths(o_ScalarField, o_PathFields[k], o_WidthFields[k],
-                                      o_TrackFields[k], o_PrintPaths2D[k], k, &pathDebug[k])) {
+      const int section=k+getPrintSectionOffset();
+      if (!zTsField::extractPrintPaths(o_ScalarField, o_PathFields[section], o_WidthFields[section],
+                                      o_TrackFields[section], o_PrintPaths2D[k], k, &pathDebug[k])) {
         failed[k] = 1;
         continue;
       }
-      if (k < int(o_FaceTagSources.size()) && !o_FaceTagSources[k].edgeTags.empty()) {
-        const zTsField::FaceTagQuery query(o_FaceTagSources[k]);
+      if (section < int(o_FaceTagSources.size()) && !o_FaceTagSources[section].edgeTags.empty()) {
+        const zTsField::FaceTagQuery query(o_FaceTagSources[section]);
         for (auto &path : o_PrintPaths2D[k])
           if (!zTsField::labelFaceTagSegments(path, query, false)) throw std::runtime_error("Invalid FaceTag provenance");
       }
-      if (!zTsField::mapPrintPaths(o_PrintPaths2D[k], o_IsoMeshes2D[k], o_IsoMeshes[k],
+      if (!zTsField::mapPrintPaths(o_PrintPaths2D[k], o_IsoMeshes2D[section], o_IsoMeshes[section],
                                   &_VLength, o_PrintPaths3D[k], k)) failed[k] = 1;
     } catch (...) { parallelErrors2.capture(k); }
   }
@@ -424,7 +426,7 @@ ZSPACE_INLINE bool TopologySlicer::computePrintPathImpl(bool useParallel) {
   std::string failedLayers;
   for (int k = 0; k < n; ++k)
     if (failed[k]) failedLayers += (failedLayers.empty() ? "" : ",") + std::to_string(k);
-  _Status = "Processed print paths for " + std::to_string(n) + " layers.";
+  _Status = "Processed print paths for " + std::to_string(printedLayers) + " TCP layers.";
   if (!failedLayers.empty()) {
     _Status += " Extraction or mapping failed on layer(s): " + failedLayers;
     return false;

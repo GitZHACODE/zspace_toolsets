@@ -179,11 +179,12 @@ ordinary spacing on 2D distortion. Edges crossing section triangles remain chord
 between mapped target points; it does not insert every triangle crossing or
 guarantee that entire edges lie on the section.
 
-Both slicers retain all section/chart/height tables, including the exact top cap
-as a fixed/reference mesh, but extract and print only the first `N - 1` layers.
-The omitted cap contributes no printed path or print statistics. PrintSyn accepts
-this printed prefix with the complete section tables; its combined path links
-only printed layers.
+Both slicers retain all `N` section/chart/height tables. Section zero is the
+supporting substrate; the `N - 1` printed TCP layers use sections `1..N-1`,
+including the exact top cap. `getPrintSectionOffset()` maps printed layer `p`
+to section `p+1`. PrintSyn receives matching suffixes of charts, sections,
+heights, normals and FaceTag sources. Bracing/slot alternation starts at the
+first printed TCP layer. The substrate contributes no print path/statistics.
 
 With iso relaxation disabled, harmonic heights use the local normal-spacing estimate `deltaW / |grad(w)|`,
 where `deltaW = 1 / (numberOfLayers - 1)` and `w` is the final harmonic field
@@ -217,9 +218,13 @@ settings._HIsoRelaxMaxDeviation = 0.0;   // model units; 0 selects automatic lim
 ```
 
 Each intermediate layer solves a screened biharmonic target with cotangent
-Laplacian `L` and lumped vertex mass `M`:
-`(M + strength * meanEdge^4 * L.transpose() * M.inverse() * L) X = M X_original`.
-Projected, backtracked steps approach that target. Connectivity remains fixed.
+Laplacian `L`, lumped vertex mass `M`, and
+`B = strength * meanEdge^4 * L.transpose() * M.inverse() * L`.
+The target solves `(M + B) X = M X_original`, once. Projected, backtracked
+steps approach that target rather than repeatedly applying diffusion.
+Connectivity remains fixed. The constrained-target experiment was rejected
+because it made height queries fail on the shared input; the existing
+relaxation target is retained.
 Top and bottom cap coordinates are copied exactly, including genuine roof ridges.
 
 Boundary edges retain their input side-width groups and connected planar support
@@ -257,12 +262,22 @@ extends toward increasing harmonic layers. This local direction follows the
 cap geometry even when the solid is rotated; source meshes, tetrahedra and
 height-solver normals are unchanged. The projection override is rebuilt after
 relaxation and surface-height feedback, including zero relaxation iterations.
-Heights are recomputed against neighbouring relaxed meshes along
-the recovered normal, averaging the two full adjacent gaps for an intermediate
-layer and using one full gap at each cap. If a trimmed side boundary prevents a
+TCP heights are recomputed against the previously deposited section, along
+the negative recovered print normal. Section zero is the supporting substrate;
+printed sections run from one through the fixed top cap. The growth normal is
+also supplied at the top TCP section without changing the source cap winding.
+If a trimmed side boundary prevents a
 ray hit, a local tangent-plane estimate from the closest adjacent point and its
-recovered normal is used and counted. These are geometric spacing estimates,
-not a nozzle-clearance or extrusion optimisation.
+recovered normal is used and counted. Unreliable auxiliary forward queries are
+reported and omitted; primary previous-section queries remain mandatory, as do
+exact collision/separation checks. This is a geometric TCP-to-support height
+model; a supplied machine nozzle frame or physical substrate is not inferred.
+Nodal heights remain guides for chart transfer and raw inspection. After final
+projection, relaxed harmonic paths measure each actual TCP against the previous
+section using its supplied print normal. These strict rays replace final path
+heights before linking/export. A miss is unsupported, not a plane-extrapolated
+TCP value. Interpolating nodal distances is not equivalent to intersecting the
+actual TCP ray, especially on warped sections.
 
 Outer junction features follow the resulting path's edge ownership. Geometric
 inner turns remain ordinary supports; outer turns do not add targets. PrintSyn carries aligned junction
@@ -270,9 +285,9 @@ metadata through projection and linking. Relaxation does not move already-genera
 The optional per-section normal tables follow the same ordering contract as the
 per-section height tables; an empty normal table uses the existing face-normal
 mapping. Zero relaxation iterations retains the previous geometry, gradient-based
-heights and face-normal path behavior. The requested strict previous-mesh-only
-height rule was withdrawn; the existing height formulations described above
-remain in use. The controls currently exist in C++. The local TASK-008 Alice2
+heights and face-normal path behavior. The TCP clarification on 29 October
+supersedes the earlier averaged-gap convention. The controls currently exist
+in C++. The local TASK-008 Alice2
 build was rebuilt against this source; packaged Python/browser consumers still
 need a coordinated rebuild and their runtimes have not been refreshed.
 
@@ -284,6 +299,45 @@ constraints and targets. `zTsRelax::Settings::Parallel` follows the slicer's
 `useParallel` argument. `Report::StageMilliseconds` records setup, gap bounds,
 sparse targets, trial checks, normals/heights plus diagnostics, and total time.
 
+Local height correction uses one scalar normal offset per movable vertex,
+projected into its exact side/crease tangent space. Its sparse system includes
+the absolute seed-surface bending force, not only displacement regularization.
+Caps stay fixed. Initial slivers are not automatically remeshed or pinned for
+this correction; triangle validity, side support, transported UV, containment,
+self-intersection and adjacent-layer checks still apply to every accepted
+geometry. Independent layers backtrack separately, followed by joint height
+and separation checks. Only layers referenced by active height/contact rows
+participate in a correction batch; unrelated feasible layers remain exact.
+Each frozen-coefficient batch has at most 32 consensus iterations. Stable
+successful layer checks and prepared spatial
+trees are reused; geometry/normal preparation runs in parallel.
+Production correction starts after the real footprint exists, rather than
+running a blind nodal correction before chart/field/path extraction. Feedback
+samples cache actual previous-section intersections and differentiate both
+their material positions and the normalized interpolated TCP normals.
+
+The target-height contract is the previous deposited section's gap at every
+printed TCP section. `HeightReport` also exposes both-direction gap extrema;
+auxiliary forward gaps are diagnostics and do not replace the process height.
+Report fields include
+scalar unknowns, fixed/sliver vertices, uncontrollable samples, sparse factors,
+outer/inner iterations and line-search trials. `Height.*` method timings
+separate consensus, projection construction, geometry trials and height queries.
+`HPrintHeight.Iterations` is shared across initial correction, footprint
+feedback and layer-count candidates; it is not restarted per pipeline rebuild.
+Unchanged surfaces skip chart/field/path rebuilding. At most two footprint
+corrections share this budget and a conservative displacement budget per
+candidate. Final validation measures actual rays at every TCP, chart-triangle
+crossing and curve samples no more than 1 mm apart in the chart (including raw
+curves before the trim seam). This is finite sampled validation, not a proof of
+every point on a continuous robot trajectory. Guide hulls use observed curve
+samples only, plus both worst interior bound violations per triangle.
+Budget exhaustion is failure, never attribute clamping or
+partial-layer output. Multi-pass displacement totals are conservative sums,
+not a measurement from one common original seed.
+
+The following historical relaxation benchmark predates these height-solver
+and junction-feature changes; it is not a current optimizer benchmark.
 On the shared `slicer_inputs/example.usda` (SHA-256
 `9BE2169D3779878DC42CAD2EA95F81E5B232C1F26C2AA588F2761C73563D4E52`),
 Release/MSVC, four OpenMP threads, one warmup per mode and five alternating
@@ -314,13 +368,15 @@ at the user's request and is not a valid physical extrusion result. Relaxed
 example path heights range from 5.841 to 16.983 mm. Native checks passing do not
 constitute printability approval.
 
-`zTsUtils::buildPrintMesh()` lofts one rectangle per print-path vertex, with width
-centered on the path (`-width/2` to `+width/2`) and height extending from `0` to
-`height`. Sections are perpendicular to the neighbor-to-neighbor chord, with
+`zTsUtils::buildPrintMesh()` lofts one 16-sided ellipse per TCP vertex. Its full
+width is centred on the path (`-width/2` to `+width/2`); its full height extends
+below the TCP, from `-height` to `0`, with centre at `-height/2`. Cardinal points
+are exact, including the top point at the TCP. Sections are perpendicular to
+the neighbor-to-neighbor chord, with
 the print normal projected into the section's height axis. Raw edge vectors
 retain segment-length weighting at corners; endpoint tangents use the adjacent
 edge and closed curves use wrapped neighbors. Chords stay forward throughout to
-avoid flipping rectangle vertex order. A complete reversal uses the outgoing
+avoid flipping profile vertex order. A complete reversal uses the outgoing
 edge; a print normal parallel to the section tangent is rejected.
 Each graph component and
 layer stays separate; open paths receive end caps. Zero widths/heights retain

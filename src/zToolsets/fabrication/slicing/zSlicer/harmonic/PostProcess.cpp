@@ -9,6 +9,7 @@
 #endif
 
 #include <sstream>
+#include <array>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -30,52 +31,91 @@ struct SurfaceFootprint {
   double Minimum=std::numeric_limits<double>::infinity(),Maximum=0;
   int Violations=0;
 };
-// Within one chart triangle both the mapped position and the existing nodal
-// height interpolation are affine. A convex hull of the original curve's
-// material supports therefore bounds EVERY point of that footprint, without
-// adding any fabrication targets or retaining every dense SDF vertex.
+template<class Array> Array tcpSections(const Array &all) {
+  // Keep section zero as an immutable support, not a robot target.
+  return all.empty()?Array{}:Array(all.begin()+1,all.end());
+}
+bool measureTCPPaths(const std::vector<zTsRelax::Layer> &layers,PrintPathArray &paths,
+    bool parallel,std::string &error) {
+  zTsUtils::ScopedSlicingTiming timing("HarmonicPostProcess.measureTCPPaths");
+  std::vector<zPointArray> targets(paths.size());std::vector<zVectorArray> normals(paths.size());
+  for(size_t k=0;k<paths.size();++k)for(const auto &path:paths[k]){zPointArray p;
+    zFnGraph(const_cast<zObjGraph&>(path.graph)).getVertexPositions(p);
+    targets[k].insert(targets[k].end(),p.begin(),p.end());
+    normals[k].insert(normals[k].end(),path.normals.begin(),path.normals.end());}
+  std::vector<zFloatArray> heights;
+  if(!zTsRelax::measureTargetHeights(layers,targets,normals,heights,error,parallel))return false;
+  for(size_t k=0;k<paths.size();++k){size_t cursor=0;for(auto &path:paths[k]){
+    const size_t n=size_t(zFnGraph(path.graph).numVertices());
+    path.heights.assign(heights[k].begin()+cursor,heights[k].begin()+cursor+n);cursor+=n;}}
+  return true;
+}
+// Compact hulls guide geometry correction. Physical TCP heights are nonlinear
+// under normal interpolation: validate original and sampled curves with actual
+// previous-section rays at chart crossings and at most 1 mm chart intervals.
+// These diagnostic samples never change fabrication targets or their counts.
 bool surfaceFootprint(const PrintPathArray &curves,const zObjMeshArray &charts,
-    const zObjMeshArray &sections,const std::vector<zFloatArray> &heights,
+    const zObjMeshArray &sections,const std::vector<zVectorArray> &normals,
+    const std::vector<zTsRelax::Layer> &layers,
     const PrintHeightOptimizationSettings &domain,bool parallel,SurfaceFootprint &out,std::string &error){
   zTsUtils::ScopedSlicingTiming footprintTiming("HarmonicPostProcess.surfaceFootprint");
-  out=SurfaceFootprint();out.Targets.resize(curves.size());std::vector<double> low(curves.size(),out.Minimum),high(curves.size(),0);
-  std::vector<int> bad(curves.size(),0);std::vector<std::string> errors(curves.size());zTsDetail::ParallelErrors failures(curves.size());
+  out=SurfaceFootprint();out.Targets.resize(curves.size());
+  std::vector<zPointArray> probes(curves.size());std::vector<zVectorArray> probeNormals(curves.size());
+  std::vector<zIntArray> probeTriangles(curves.size());
+  std::vector<std::string> errors(curves.size());zTsDetail::ParallelErrors failures(curves.size());
   #pragma omp parallel for schedule(dynamic) if(parallel)
   for(int k=0;k<int(curves.size());++k){try{
     zTsDetail::SurfaceQuery query(const_cast<zObjMesh&>(charts[k]));zPointArray world,chart;
     zFnMesh(const_cast<zObjMesh&>(sections[k])).getVertexPositions(world);zFnMesh(const_cast<zObjMesh&>(charts[k])).getVertexPositions(chart);
+    if(size_t(k)>=normals.size()||(!normals[k].empty()&&normals[k].size()!=world.size())){errors[k]="TCP footprint normals do not match the section.";continue;}
     double scale=1;for(const auto &p:chart)scale=(std::max)(scale,toEigenVec(p).cwiseAbs().maxCoeff());
     const double tolerance=(std::max)(1e-7,8*std::numeric_limits<float>::epsilon()*scale);
     std::map<int,std::vector<V>> supports;
     for(const auto &curve:curves[k]){zPointArray p;zIntArray edges;zFnGraph fn(const_cast<zObjGraph&>(curve.graph));fn.getVertexPositions(p);fn.getEdgeData(edges);
       for(size_t e=0;e+1<edges.size();e+=2){const auto &a=p[edges[e]],&b=p[edges[e+1]];std::vector<double> breaks;
         if(!query.chartSegment(a,b,tolerance,breaks)){errors[k]="Continuous height footprint leaves its chart or has overlapping supports.";break;}
+        const double step=(std::min)(1.0,.25*domain.Minimum);
+        const double length=(toEigenVec(b)-toEigenVec(a)).norm();
+        const double pieces=std::ceil(length/step);
+        if(!std::isfinite(pieces)||pieces>2000000){errors[k]="TCP height validation sample budget exceeded.";break;}
+        const int count=(std::max)(1,int(pieces));
+        for(int j=0;j<=count;++j)breaks.push_back(double(j)/count);
+        std::sort(breaks.begin(),breaks.end());
+        breaks.erase(std::unique(breaks.begin(),breaks.end(),[](double a,double b){return std::abs(a-b)<1e-10;}),breaks.end());
         for(double t:breaks){const V q=(1-t)*toEigenVec(a)+t*toEigenVec(b);zTsDetail::SurfaceQuery::Hit hit;
           if(!query.uniqueChartHit(zPoint(q.x(),q.y(),q.z()),hit,tolerance)){errors[k]="Cannot map continuous height footprint.";break;}
           V w=hit.Weights.cwiseMax(0);w/=w.sum();const auto &ids=query.triangle(hit.Triangle).Ids;
-          const double h=zTsDetail::interpolateScalar(heights[k][ids[0]],heights[k][ids[1]],heights[k][ids[2]],w[0],w[1],w[2]);
-          if(!std::isfinite(h)){errors[k]="Nonfinite continuous-curve height.";break;}
-          low[k]=(std::min)(low[k],h);high[k]=(std::max)(high[k],h);
-          if(h<domain.Minimum-domain.Tolerance||h>domain.Maximum+domain.Tolerance)++bad[k];supports[hit.Triangle].push_back(w);}
+          V p=V::Zero(),n=V::Zero();for(int j=0;j<3;++j){p+=w[j]*toEigenVec(world[ids[j]]);
+            if(!normals[k].empty())n+=w[j]*toEigenVec(normals[k][ids[j]]);}
+          if(normals[k].empty())n=(toEigenVec(world[ids[1]])-toEigenVec(world[ids[0]])).cross(toEigenVec(world[ids[2]])-toEigenVec(world[ids[0]]));
+          if(!n.allFinite()||n.norm()<1e-12){errors[k]="Cannot recover a TCP footprint normal.";break;}n.normalize();
+          probes[k].emplace_back(p.x(),p.y(),p.z());probeNormals[k].emplace_back(n.x(),n.y(),n.z());
+          probeTriangles[k].push_back(hit.Triangle);supports[hit.Triangle].push_back(w);}
         if(!errors[k].empty())break;}
       if(!errors[k].empty())break;}
     if(!errors[k].empty())continue;
     const auto cross=[](const V &a,const V &b,const V &c){return (b[1]-a[1])*(c[2]-a[2])-(b[2]-a[2])*(c[1]-a[1]);};
     for(auto &entry:supports){auto &points=entry.second;
-      // A rebuilt chart moves the material footprint slightly. Cover a small
-      // TWO-dimensional neighbourhood of the curve, clipped to its face.
-      // A single sample towards the centroid does not cover that region.
-      const auto original=points;points.clear();points.reserve(3*original.size());
-      for(const auto &w:original)for(int j=0;j<3;++j)points.push_back(.88*w+.12*V::Unit(j));
+      // Hull vertices must be actual curve samples. Artificial padding towards
+      // triangle corners can be unsupported even when the TCP curve is valid.
       std::sort(points.begin(),points.end(),[](const V &a,const V &b){return a[1]<b[1]||(a[1]==b[1]&&a[2]<b[2]);});
       points.erase(std::unique(points.begin(),points.end(),[](const V &a,const V &b){return (a-b).norm()<1e-10;}),points.end());
       std::vector<V> hull;for(const auto &p:points){while(hull.size()>1&&cross(hull[hull.size()-2],hull.back(),p)<=1e-12)hull.pop_back();hull.push_back(p);}
       const size_t lower=hull.size();if(points.size()>1){for(int i=int(points.size())-2;i>=0;--i){while(hull.size()>lower&&cross(hull[hull.size()-2],hull.back(),points[i])<=1e-12)hull.pop_back();hull.push_back(points[i]);}hull.pop_back();}
       const auto &ids=query.triangle(entry.first).Ids;for(const auto &w:hull){V p=V::Zero();for(int j=0;j<3;++j)p+=w[j]*toEigenVec(world[ids[j]]);out.Targets[k].emplace_back(p.x(),p.y(),p.z());}}
   }catch(...){failures.capture(k);}}
-  failures.rethrow();for(size_t k=0;k<curves.size();++k){if(!errors[k].empty()){error=errors[k];return false;}
-    out.Minimum=(std::min)(out.Minimum,low[k]);out.Maximum=(std::max)(out.Maximum,high[k]);out.Violations+=bad[k];}
-  if(!std::isfinite(out.Minimum)){error="No continuous print-curve supports.";return false;}return true;
+  failures.rethrow();for(const auto &message:errors)if(!message.empty()){error=message;return false;}
+  std::vector<zFloatArray> measured;
+  if(!zTsRelax::measureTargetHeights(layers,probes,probeNormals,measured,error,parallel))return false;
+  for(size_t k=0;k<curves.size();++k){std::map<int,std::array<std::pair<double,size_t>,2>> worst;
+    for(size_t i=0;i<measured[k].size();++i){const double h=measured[k][i];
+      out.Minimum=(std::min)(out.Minimum,h);out.Maximum=(std::max)(out.Maximum,h);
+      const double v=(std::max)({0.0,domain.Minimum-h,h-domain.Maximum});
+      if(v>domain.Tolerance){++out.Violations;auto &entry=worst[probeTriangles[k][i]][h<domain.Minimum?0:1];if(v>entry.first)entry={v,i};}}
+    // Actual ray height can peak inside a triangle. Include its worst observed
+    // violation instead of assuming hull endpoint heights bound the interior.
+    for(const auto &entry:worst)for(const auto &bound:entry.second)if(bound.first>0)out.Targets[k].push_back(probes[k][bound.second]);}
+  if(!std::isfinite(out.Minimum)){error="No TCP curve validation samples.";return false;}return true;
 }
 }
 
@@ -139,18 +179,42 @@ ZSPACE_INLINE bool HarmonicSlicer::computePostProcessImpl(const PrintSynSetting 
   const auto &domain=i_Settings.HPrintHeight;PrintPathArray surfaceContours;SurfaceFootprint footprint;
   const auto pipeline=[&](){const bool enabled=domain.Enabled&&domain.OptimizeSurfaces;
     if(!computePrintPath(useParallel))return false;PrintPathArray rawContours;if(enabled)rawContours=o_PrintPaths2D;
-    if(!zPrintSyn::computePipeline(o_IsoMeshes2D,o_IsoMeshes,nullptr,
+    const auto charts=tcpSections(o_IsoMeshes2D),sections=tcpSections(o_IsoMeshes);
+    const auto heights=tcpSections(o_VertexLayerHeights);const auto normals=tcpSections(o_VertexLayerNormals);
+    const auto sources=tcpSections(o_FaceTagSources);
+    if(!zPrintSyn::computePipeline(charts,sections,nullptr,
       zPrintSyn::SeamMapping::WorldNearest,settings,o_PrintPaths2D,o_PrintPaths3D,
-      o_ResultantPrintPath,_Status,useParallel,&o_VertexLayerHeights,&o_VertexLayerNormals,enabled?&surfaceContours:nullptr,&o_FaceTagSources))return false;
+      o_ResultantPrintPath,_Status,useParallel,&heights,&normals,enabled?&surfaceContours:nullptr,&sources))return false;
+    const auto layerGeometry=i_Settings._HIsoRelaxIterations>0?relaxationLayers():std::vector<zTsRelax::Layer>{};
+    if(i_Settings._HIsoRelaxIterations>0){
+      if(!measureTCPPaths(layerGeometry,o_PrintPaths3D,useParallel,_Status)||
+          !zPrintSyn::linkPrintPaths(o_PrintPaths3D,o_ResultantPrintPath,_Status)){
+        o_ResultantPrintPath=PrintPath();return false;}}
     if(enabled){
       // Validate the entire original SDF curve, including the future seam
       // interval. Sampling/feature reconstruction cannot hide an excursion.
       for(size_t k=0;k<surfaceContours.size();++k)surfaceContours[k].insert(surfaceContours[k].end(),rawContours[k].begin(),rawContours[k].end());}
-    if(enabled&&!surfaceFootprint(surfaceContours,o_IsoMeshes2D,o_IsoMeshes,o_VertexLayerHeights,domain,useParallel,footprint,_Status)){
+    if(enabled&&!surfaceFootprint(surfaceContours,charts,sections,normals,layerGeometry,domain,useParallel,footprint,_Status)){
       o_ResultantPrintPath=PrintPath();return false;}return true;};
   bool ok=pipeline();
   if(!ok||!domain.Enabled||!domain.OptimizeSurfaces)return ok;
   auto total=_PrintHeightOptimizationReport;
+  // Iterations is one correction budget for the complete fabrication pipeline,
+  // not a fresh budget for every feedback pass and layer-count candidate.
+  const int iterationLimit=domain.Iterations;
+  const auto remainingIterations=[&](){return (std::max)(0,iterationLimit-total.OuterIterations);};
+  const auto accumulateWork=[&](const zTsRelax::HeightReport &r){
+    if(total.OuterIterations==0&&total.Factorizations==0){total.InitialMinimum=r.InitialMinimum;
+      total.InitialMaximum=r.InitialMaximum;total.InitialBendingEnergy=r.InitialBendingEnergy;}
+    total.AcceptedIterations+=r.AcceptedIterations;total.Milliseconds+=r.Milliseconds;
+    total.Factorizations+=r.Factorizations;total.OuterIterations+=r.OuterIterations;
+    total.InnerIterations+=r.InnerIterations;total.LineSearchTrials+=r.LineSearchTrials;
+    total.DegreesOfFreedom=(std::max)(total.DegreesOfFreedom,r.DegreesOfFreedom);
+    total.InitialSliverVertices=r.InitialSliverVertices;total.FixedVertices=r.FixedVertices;
+    total.UncontrollableSamples=r.UncontrollableSamples;
+    total.UnavailableAuxiliaryGaps=r.UnavailableAuxiliaryGaps;
+    total.MinimumDirectedGap=r.MinimumDirectedGap;total.MaximumDirectedGap=r.MaximumDirectedGap;
+  };
   const int initialSections=int(o_IsoMeshes.size());std::vector<int> candidates{initialSections};
   struct SurfaceState {
     zObjMeshArray Iso,Charts;zObjGraphArray Boundary,Boundary2D;
@@ -164,15 +228,21 @@ ZSPACE_INLINE bool HarmonicSlicer::computePostProcessImpl(const PrintSynSetting 
     best.UV=o_IsoMeshUV;best.Heights=o_VertexLayerHeights;best.Normals=o_VertexLayerNormals;best.EdgeWidths=_HarmonicIsoEdgeWidthIds;
     best.Widths=o_IsoMeshBoundaryWidthId;best.RegionTags=o_IsoMeshBoundaryFaceTags;best.Levels=_IsoValues;best.Paths2D=o_PrintPaths2D;best.Paths3D=o_PrintPaths3D;
     best.Report=total;best.Relaxation=_IsoRelaxationReport;best.Valid=true;};
-  std::string lastCandidateError;
+  std::string lastCandidateError;int attemptedCandidates=1;
   for(size_t candidate=0;candidate<candidates.size();++candidate){
-    if(candidate){_RequestedSectionCount=candidates[candidate];if(!computeContours(useParallel)||!computeField(useParallel)||!pipeline()){
-        lastCandidateError=_Status;zTsUtils::printDebug("[surfaceCount] sections="+std::to_string(candidates[candidate])+" rejected: "+_Status);continue;}
-      total.AcceptedIterations+=_PrintHeightOptimizationReport.AcceptedIterations;total.Milliseconds+=_PrintHeightOptimizationReport.Milliseconds;
-      total.Factorizations+=_PrintHeightOptimizationReport.Factorizations;total.OuterIterations+=_PrintHeightOptimizationReport.OuterIterations;}
-    // One surface-only feedback cycle is allowed for the actual fabrication
-    // footprint. No individual target moves; regenerate charts/fields afterward.
-    for(int feedback=0;feedback<=1;++feedback){double lo=std::numeric_limits<double>::infinity(),hi=0;int bad=0,points=0;
+    if(candidate){
+      if(remainingIterations()==0)break;
+      ++attemptedCandidates;
+      _RequestedSectionCount=candidates[candidate];const bool contoursReady=computeContours(useParallel);
+      accumulateWork(_PrintHeightOptimizationReport);
+      if(!contoursReady||!computeField(useParallel)||!pipeline()){
+        lastCandidateError=_Status;zTsUtils::printDebug("[surfaceCount] sections="+std::to_string(candidates[candidate])+" rejected: "+_Status);continue;}}
+    double candidateMovement=0;
+    const double movementLimit=domain.MaxDisplacement>0?domain.MaxDisplacement:2*domain.Maximum;
+    // At most two geometry corrections for the actual fabrication footprint.
+    // The second can repair a shifted material footprint after chart rebuild;
+    // both share the same outer-iteration budget. No target moves individually.
+    for(int feedback=0;feedback<=2;++feedback){double lo=std::numeric_limits<double>::infinity(),hi=0;int bad=0,points=0;
       for(const auto &layer:o_PrintPaths3D)for(const auto &path:layer)for(float h:path.heights){
         lo=(std::min)(lo,double(h));hi=(std::max)(hi,double(h));++points;
         if(!std::isfinite(h)||h<domain.Minimum-domain.Tolerance||h>domain.Maximum+domain.Tolerance)++bad;}
@@ -196,15 +266,30 @@ ZSPACE_INLINE bool HarmonicSlicer::computePostProcessImpl(const PrintSynSetting 
         const int low=(std::max)(2,int(std::floor(estimate))),high=(std::max)(2,int(std::ceil(estimate)));
         for(int count:{low+1,high+1})if(std::find(candidates.begin(),candidates.end(),count)==candidates.end())candidates.push_back(count);
       }
-      if(feedback==1)break;
+      if(feedback==2)break;
+      if(remainingIterations()==0){lastCandidateError="Surface correction iteration budget exhausted.";break;}
+      const double remainingMovement=movementLimit-candidateMovement;
+      if(remainingMovement<=1e-9){lastCandidateError="Surface correction displacement budget exhausted.";break;}
       auto targets=footprint.Targets;
       for(size_t k=0;k<targets.size();++k)for(const auto &path:o_PrintPaths3D[k]){zPointArray points;
         zFnGraph(const_cast<zObjGraph&>(path.graph)).getVertexPositions(points);targets[k].insert(targets[k].end(),points.begin(),points.end());}
-      std::string error;if(!optimizeSurfaceHeightDomain(&targets,error,useParallel)){lastCandidateError="Surface feedback failed: "+error;break;}
-      total.AcceptedIterations+=_PrintHeightOptimizationReport.AcceptedIterations;total.Milliseconds+=_PrintHeightOptimizationReport.Milliseconds;
-      total.Factorizations+=_PrintHeightOptimizationReport.Factorizations;total.OuterIterations+=_PrintHeightOptimizationReport.OuterIterations;
+      // A constrained solver can return valid geometry without moving it.
+      // Rebuilding ARAP charts/SDFs/paths in that case cannot improve the same
+      // footprint and used to repeat the most expensive downstream stages.
+      std::vector<zPointArray> before(o_IsoMeshes.size());
+      for(size_t k=1;k+1<o_IsoMeshes.size();++k)zFnMesh(o_IsoMeshes[k]).getVertexPositions(before[k]);
+      std::string error;const bool corrected=optimizeSurfaceHeightDomain(&targets,error,useParallel,remainingIterations(),remainingMovement);
+      accumulateWork(_PrintHeightOptimizationReport);
+      if(!corrected){lastCandidateError="Surface feedback failed: "+error;break;}
+      candidateMovement+=_PrintHeightOptimizationReport.MaxDisplacement;
       total.MaxDisplacement+=_PrintHeightOptimizationReport.MaxDisplacement;total.MaxBoundaryError=(std::max)(total.MaxBoundaryError,_PrintHeightOptimizationReport.MaxBoundaryError);
       total.FinalBendingEnergy=_PrintHeightOptimizationReport.FinalBendingEnergy;
+      bool moved=false;
+      for(size_t k=1;k+1<o_IsoMeshes.size()&&!moved;++k){zPointArray after;zFnMesh(o_IsoMeshes[k]).getVertexPositions(after);
+        if(after.size()!=before[k].size()){moved=true;break;}
+        for(size_t i=0;i<after.size();++i)if(zTsUtils::vecDistSq(after[i],before[k][i])!=0){moved=true;break;}}
+      if(!moved){lastCandidateError="Surface feedback is constrained: no geometry changed.";
+        zTsUtils::printDebug("[surfaceHeightOptimizer] unchanged surfaces; skipped chart/field/path rebuild.");break;}
       if(!rebuildSurfaceCharts(useParallel)||!pipeline()){lastCandidateError=_Status;break;}
     }
   }
@@ -213,9 +298,11 @@ ZSPACE_INLINE bool HarmonicSlicer::computePostProcessImpl(const PrintSynSetting 
     o_VertexLayerNormals=std::move(best.Normals);_HarmonicIsoEdgeWidthIds=std::move(best.EdgeWidths);o_IsoMeshBoundaryWidthId=std::move(best.Widths);o_IsoMeshBoundaryFaceTags=std::move(best.RegionTags);_IsoValues=std::move(best.Levels);
     _IsoRelaxationReport=best.Relaxation;computeField(useParallel);o_PrintPaths2D=std::move(best.Paths2D);o_PrintPaths3D=std::move(best.Paths3D);
     best.Report.AcceptedIterations=total.AcceptedIterations;best.Report.OuterIterations=total.OuterIterations;
-    best.Report.Factorizations=total.Factorizations;best.Report.Milliseconds=total.Milliseconds;total=best.Report;}
-  std::ostringstream message;message<<"Surface height domain not achieved after "<<candidates.size()<<" layer-count candidates: "
-    <<total.ViolatingVertices<<" path/continuous-curve supports outside ["<<domain.Minimum<<","<<domain.Maximum<<"] +/-"<<domain.Tolerance
+    best.Report.Factorizations=total.Factorizations;best.Report.Milliseconds=total.Milliseconds;
+    best.Report.InnerIterations=total.InnerIterations;best.Report.LineSearchTrials=total.LineSearchTrials;
+    best.Report.DegreesOfFreedom=total.DegreesOfFreedom;total=best.Report;}
+  std::ostringstream message;message<<"Surface height domain not achieved after "<<attemptedCandidates<<" layer-count candidates and "<<total.OuterIterations<<"/"<<iterationLimit<<" correction iterations: "
+    <<total.ViolatingVertices<<" TCP/curve validation samples outside ["<<domain.Minimum<<","<<domain.Maximum<<"] +/-"<<domain.Tolerance
     <<", measured ["<<total.Minimum<<","<<total.Maximum<<"].";
   if(!lastCandidateError.empty())message<<" Last rejected candidate: "<<lastCandidateError;
   total.LastRejectedReason=message.str();_PrintHeightOptimizationReport=total;_Status=message.str();o_ResultantPrintPath=PrintPath();return false;

@@ -187,11 +187,11 @@ void compute(Session& current, const Json& input) {
   }
   Json layers=Json::array(); const auto& paths=candidate->get3DPrintPaths();
   for(size_t i=0;i<slices->size();++i) {
-    Json layerPaths=Json::array(); if(i<paths.size()) for(const auto& p:paths[i]) layerPaths.push_back(path(p));
+    Json layerPaths=Json::array(); if(i>0&&i-1<paths.size()) for(const auto& p:paths[i-1]) layerPaths.push_back(path(p));
     layers.push_back({{"slice",mesh((*slices)[i])},{"chart",mesh((*charts)[i])},
       {"paths",layerPaths},{"pathField",(*pathFields)[i]},{"widthField",(*widthFields)[i]}});
   }
-  Json result={{"useParallel",useParallel},{"threadCount",threadCount},{"mode",mode},{"status",candidate->getStatus()},{"layers",layers},
+  Json result={{"useParallel",useParallel},{"threadCount",threadCount},{"mode",mode},{"printSectionOffset",1},{"status",candidate->getStatus()},{"layers",layers},
     {"field",mesh(*field)},{"combined",path(candidate->getResultantPrintPath())},{"postProcessed",processed}};
   auto bytes=zspaceTransfer::encode(result);
   current.engine=std::move(candidate); current.result=std::move(bytes);

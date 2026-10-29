@@ -84,7 +84,7 @@ struct PrintHeightOptimizationSettings {
   bool Enabled = false; // Harmonic only; bounds use the mesh's model units.
   double Tolerance = 0.0; // Fabrication allowance in model units; measured values are never clamped.
   double Minimum = 6.0, Maximum = 12.0;
-  int Iterations = 16;
+  int Iterations = 16; // Total outer correction budget across seed, feedback and count candidates.
   bool RedistributeIsoValues = true;
   bool AllowLayerCountChange = true;
   bool OptimizeSurfaces = true; // False retains scheduling only; never enables the old path-target Newton solver.
@@ -221,7 +221,8 @@ typedef std::vector<std::vector<PrintPath>> PrintPathArray;
 
 namespace zTsUtils {
 
-// Loft one rectangle per print vertex: centered width and height from 0 to h.
+// Loft one 16-sided ellipse per print vertex: full width w, full height h.
+// The TCP is its top; its center is -h/2 and bottom is -h along the height axis.
 // Sections are normal to the neighbor chord, with the print normal projected
 // into the section's height axis. Chords keep a consistent forward direction.
 // Each graph component/layer is independent; open paths receive end caps.

@@ -21,8 +21,10 @@ struct Layer {
   zPointArray Positions, UV;
   std::vector<std::array<int, 3>> Triangles;
   std::unordered_map<unsigned long long, int> BoundaryWidths;
+  // TCP clearance along -Normals to the preceding section (S1..Slast).
+  // Unprinted S0 stores an optional next-gap diagnostic, zero if unavailable.
   zFloatArray Heights;
-  zVectorArray Normals; // empty on fixed caps; preserve their face normals
+  zVectorArray Normals; // recovered TCP normals, including fixed top; S0 is unprinted
 };
 
 struct Settings {
@@ -41,6 +43,7 @@ struct Report {
   int AcceptedIterations = 0;
   int MovedBoundaryVertices = 0;
   int PlaneHeightEstimates = 0;
+  int UnavailableAuxiliaryGaps = 0;
   int RecoveredBoundaryTags = 0;
   int UVConstrainedVertices = 0;
   int SliverConstrainedVertices = 0;
@@ -56,12 +59,16 @@ struct Report {
 struct HeightReport {
   int AcceptedIterations = 0, ViolatingVertices = 0;
   int Factorizations = 0, OuterIterations = 0;
+  int DegreesOfFreedom = 0, InnerIterations = 0, LineSearchTrials = 0;
+  int InitialSliverVertices = 0, UncontrollableSamples = 0, FixedVertices = 0;
+  int UnavailableAuxiliaryGaps = 0;
   int InitialSections = 0, FinalSections = 0;
   bool Converged = false;
   double Minimum = 0, Maximum = 0, WorstViolation = 0;
   double InitialMinimum = 0, InitialMaximum = 0, Milliseconds = 0;
   double MaxDisplacement = 0, MaxBoundaryError = 0;
   double InitialBendingEnergy = 0, FinalBendingEnergy = 0;
+  double MinimumDirectedGap = 0, MaximumDirectedGap = 0;
   std::string LastRejectedReason;
 };
 
@@ -86,5 +93,13 @@ ZSPACE_TOOLSETS bool optimizeHeightDomain(const Reference &reference,
     const SampleVolume &sample, bool parallel, HeightReport &report, std::string &error,
     const std::vector<zPointArray> *printTargets = nullptr,
     double fairingStrength = 0.25);
+
+// Exact directed TCP rays. targets/normals p belong to section p+1 and cast
+// along -normal to section p; finite nonzero normals are normalized internally.
+// A miss is unsupported, never plane-extrapolated.
+ZSPACE_TOOLSETS bool measureTargetHeights(const std::vector<Layer> &layers,
+    const std::vector<zPointArray> &targets,
+    const std::vector<zVectorArray> &targetNormals,
+    std::vector<zFloatArray> &outHeights,std::string &error,bool parallel=true);
 
 } } // namespace zSpace::zTsRelax

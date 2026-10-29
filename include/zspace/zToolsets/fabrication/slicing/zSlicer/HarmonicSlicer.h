@@ -220,6 +220,8 @@ public:
   }
   zObjMeshArray &getIsoMeshes() { return o_IsoMeshes; }
   const zObjMeshArray &getIsoMeshes() const { return o_IsoMeshes; }
+  // Section zero supports deposition; TCP layer p uses section p+1.
+  int getPrintSectionOffset() const { return 1; }
   const std::vector<zPointArray> &getIsoMeshUV() const { return o_IsoMeshUV; }
   // One height per vertex: relaxed geometric normal spacing, or the original
   // gradient-based estimate when iso relaxation is disabled.
@@ -335,7 +337,7 @@ private:
   struct ContourData;
   bool relaxContours(std::string &error, bool useParallel);
   std::vector<zTsRelax::Layer> relaxationLayers() const;
-  bool optimizeSurfaceHeightDomain(const std::vector<zPointArray> *targets,std::string &error,bool useParallel);
+  bool optimizeSurfaceHeightDomain(const std::vector<zPointArray> *targets,std::string &error,bool useParallel,int iterationBudget=0,double displacementBudget=0);
   bool rebuildSurfaceCharts(bool useParallel);
   bool computeVertexLayerHeights(int numLayers, zFloatArray &heights) const;
   int crossingVertex(int a, int b, float iso, const zFloatArray &vertexHeights, ContourData &slice);

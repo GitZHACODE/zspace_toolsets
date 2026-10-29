@@ -48,8 +48,9 @@ void configure(zTsSlicing& session, zObjectMesh& mesh) {
 }
 
 void checkPaths(const PrintPathArray& layers) {
-  require(layers.size() == 4, "Expected four printable layers; exact top cap must be omitted");
-  for (const auto& layer : layers) {
+  require(layers.size() == 4, "Expected four printable TCP layers above the substrate, through the top");
+  for (size_t l = 0; l < layers.size(); ++l) {
+    const auto& layer = layers[l];
     require(!layer.empty(), "Empty print-path layer");
     for (const auto& path : layer) {
       auto& graph = const_cast<zObjGraph&>(path.graph);
@@ -67,9 +68,29 @@ void checkPaths(const PrintPathArray& layers) {
         require(std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z), "Non-finite path position");
         require(p.x >= -0.01 && p.x <= 4.01 && p.y >= -0.01 && p.y <= 4.01 && p.z >= -0.01 && p.z <= 2.01,
                 "Path escaped the input block");
+        require(std::abs(p.z - 0.5 * (l + 1)) < 2e-4,
+                "TCP layer window includes the substrate or omits the exact top");
       }
     }
   }
+}
+void checkBeadStack(const PrintPathArray& layers) {
+  zObjMesh mesh;std::string error;
+  require(zTsUtils::buildPrintMesh(layers,mesh,&error),error);
+  zPointArray vertices;zFnMesh(mesh).getVertexPositions(vertices);size_t cursor=0;
+  for(size_t l=0;l<layers.size();++l)for(const auto& path:layers[l]){
+    std::vector<zTsUtils::GraphPolyline> curves;
+    require(zTsUtils::graphPolylines(path.graph,curves),"Invalid TCP stack path");
+    for(const auto& curve:curves)for(int id:curve.Vertices){
+      require(std::abs(vertices.at(cursor).z-.5*(l+1))<2e-4,
+              "Ellipse top did not reach its TCP section");
+      require(std::abs(vertices.at(cursor+8).z-.5*l)<2e-4,
+              "Ellipse bottom did not reach the preceding section");
+      require(std::abs(path.heights[id]-.5)<2e-4,"TCP window changed the analytic layer height");
+      cursor+=16;
+    }
+  }
+  require(cursor==vertices.size(),"TCP stack test did not visit every ellipse");
 }
 
 void topology() {
@@ -81,8 +102,10 @@ void topology() {
   require(session.getPathFields().size() == 5, "Missing layer fields");
   require(session.computePrintPath(false), session.getStatus());
   checkPaths(session.get3DPrintPaths());
+  checkBeadStack(session.get3DPrintPaths());
   require(session.computePostProcess(false), session.getStatus());
   checkPaths(session.get3DPrintPaths());
+  checkBeadStack(session.get3DPrintPaths());
   auto& combined = const_cast<PrintPath&>(session.getResultantPrintPath());
   require(zFnGraph(combined.graph).numEdges() > 0, "PrintSyn did not produce a combined path");
 
@@ -131,6 +154,7 @@ void features() {
   configure(session, mesh);
   zIntArray tags(10, Side), widthIds(10, 0);
   tags[0] = Bottom; tags[1] = Top;
+  for (int side=0;side<4;++side) tags[2+side]=tags[6+side]=3+side;
   widthIds[2] = widthIds[6] = 1;
   session.setInputMesh(mesh, tags, widthIds);
   session.getSettings().BoundaryWidth = {0.4f, 0.6f};
@@ -144,6 +168,25 @@ void features() {
   require(session.getWidthGroupCount() == 2, "Width groups were lost");
   require(session.computeSlicer(false), session.getStatus());
   require(session.getTopologySlicer()->getBracingGraphs2D().size() == 5, "Bracing was not mapped to each layer");
+  const auto& sources=session.getTopologySlicer()->getFaceTagSources();
+  require(sources.size()==5&&sources[1].bracing.size()==1&&sources[2].bracing.size()==1,
+          "Missing printable bracing provenance");
+  require(std::abs(sources[1].bracing.front().trim-.625)<1e-5&&
+          std::abs(sources[2].bracing.front().trim-.375)<1e-5,
+          "First printed TCP bracing did not retain even/odd opening parity");
+  zPointArray substrateSlot,firstSlot,secondSlot;
+  zFnGraph(const_cast<zObjGraph&>(sources[0].slot)).getVertexPositions(substrateSlot);
+  zFnGraph(const_cast<zObjGraph&>(sources[1].slot)).getVertexPositions(firstSlot);
+  zFnGraph(const_cast<zObjGraph&>(sources[2].slot)).getVertexPositions(secondSlot);
+  require(!firstSlot.empty()&&firstSlot.size()==substrateSlot.size()&&firstSlot.size()==secondSlot.size(),
+          "Missing alternating boundary slots");
+  double alternateDistance=0;
+  for(size_t i=0;i<firstSlot.size();++i){
+    require(zTsUtils::vecDistSq(firstSlot[i],substrateSlot[i])<1e-10,
+            "First printed TCP boundary slot did not retain initial opening parity");
+    alternateDistance+=zTsUtils::vecDistSq(firstSlot[i],secondSlot[i]);
+  }
+  require(alternateDistance>1e-3,"Second printed TCP boundary slot did not alternate");
   const auto& widths = session.getWidthFields();
   bool varied = false;
   for (const auto& layer : widths) {
@@ -287,11 +330,11 @@ void harmonicPrintNormals() {
       zPointArray points;zFnGraph(const_cast<zObjGraph&>(path.graph)).getVertexPositions(points);
       std::vector<zTsUtils::GraphPolyline> curves;require(zTsUtils::graphPolylines(path.graph,curves),"Invalid normal test path");
       for(const auto &curve:curves)for(int id:curve.Vertices){
-        const V bottom=.5*(zTsUtils::toEigenVec(vertices.at(cursor))+zTsUtils::toEigenVec(vertices.at(cursor+1)));
-        const V top=.5*(zTsUtils::toEigenVec(vertices.at(cursor+2))+zTsUtils::toEigenVec(vertices.at(cursor+3)));
-        require((bottom-zTsUtils::toEigenVec(points[id])).norm()<5e-6,"Print-mesh height became centered across the path");
+        const V top=zTsUtils::toEigenVec(vertices.at(cursor));
+        const V bottom=zTsUtils::toEigenVec(vertices.at(cursor+8));
+        require((top-zTsUtils::toEigenVec(points[id])).norm()<5e-6,"Print-mesh top moved off the TCP");
         require((top-bottom).dot(direction)>minimum*path.heights[id],"Print mesh grows away from the next layer");
-        cursor+=4;
+        cursor+=16;
       }
     }
     require(cursor==vertices.size(),"Print mesh normal test missed a profile");
@@ -368,6 +411,7 @@ void harmonic() {
   require(session.computeSlicer(false), session.getStatus());
   require(session.computePrintPath(false), session.getStatus());
   checkPaths(session.get3DPrintPaths());
+  checkBeadStack(session.get3DPrintPaths());
   const auto checkUniform = [](const PrintPathArray &paths, double expected) {
     for (const auto &layer : paths) for (const auto &path : layer) {
       require(path.heights.size() == size_t(zFnGraph(const_cast<zObjGraph &>(path.graph)).numVertices()),
@@ -389,37 +433,64 @@ void harmonic() {
             "Height table does not match its independent iso mesh");
   require(session.computePostProcess(false), session.getStatus());
   checkPaths(session.get3DPrintPaths());
+  checkBeadStack(session.get3DPrintPaths());
   checkUniform(session.get3DPrintPaths(), 0.5);
   checkUniform(PrintPathArray{{session.getResultantPrintPath()}}, 0.5);
   require(session.getPrintVolume() > 0, "PrintSyn discarded harmonic height/volume");
   const auto serialCombinedHeights = session.getResultantPrintPath().heights;
 
-  // A distinct constant on each independent section makes an accidental shared
-  // height table observable, including after resampling and seam alignment.
-  std::vector<zFloatArray> perLayer = heights;
+  // Low-level PrintSyn supports explicitly supplied nodal attributes. Distinct
+  // constants expose a shared-table bug, but are not physical TCP ray heights.
+  std::vector<zFloatArray> perLayer(heights.begin()+1,heights.end());
   for (size_t l = 0; l < perLayer.size(); ++l)
-    perLayer[l].assign(perLayer[l].size(), 0.2f + 0.1f * float(l));
+    perLayer[l].assign(perLayer[l].size(), 0.3f + 0.1f * float(l));
   require(session.computePrintPath(false), session.getStatus());
   auto paths2D = session.get2DPrintPaths();
   PrintPathArray projected;
   PrintPath combined;
   std::string status;
-  require(zPrintSyn::computePipeline(slicer->getIsoMeshes2D(), slicer->getIsoMeshes(), nullptr,
+  const zObjMeshArray printCharts(slicer->getIsoMeshes2D().begin()+1,slicer->getIsoMeshes2D().end());
+  const zObjMeshArray printSections(slicer->getIsoMeshes().begin()+1,slicer->getIsoMeshes().end());
+  require(zPrintSyn::computePipeline(printCharts, printSections, nullptr,
       zPrintSyn::SeamMapping::WorldNearest, session.getPrintSynSetting(), paths2D, projected,
       combined, status, false, &perLayer), status);
   for (size_t l = 0; l < projected.size(); ++l)
-    checkUniform(PrintPathArray{projected[l]}, 0.2 + 0.1 * l);
+    checkUniform(PrintPathArray{projected[l]}, 0.3 + 0.1 * l);
   require(!combined.heights.empty(), "Linked path lost per-layer heights");
   for (float h : combined.heights)
-    require(h >= 0.2f - 1e-5f && h <= 0.6f + 1e-5f, "Linked height escaped the section ranges");
+    require(h >= 0.3f - 1e-5f && h <= 0.6f + 1e-5f, "Linked height escaped the section ranges");
+  // The harmonic wrapper replaces those proxy attributes with actual rays.
+  // Exercise the same public geometric API and linking on the analytic stack.
+  std::vector<zTsRelax::Layer> rayLayers(slicer->getIsoMeshes().size());
+  for(size_t k=0;k<rayLayers.size();++k){zIntArray connects,counts;
+    zFnMesh meshFn(const_cast<zObjMesh&>(slicer->getIsoMeshes()[k]));
+    meshFn.getVertexPositions(rayLayers[k].Positions);meshFn.getPolygonData(connects,counts);size_t cursor=0;
+    for(int count:counts){require(count==3,"Expected triangular ray reference");
+      rayLayers[k].Triangles.push_back({connects[cursor],connects[cursor+1],connects[cursor+2]});cursor+=3;}}
+  std::vector<zPointArray> rayTargets(projected.size());std::vector<zVectorArray> rayNormals(projected.size());
+  for(size_t k=0;k<projected.size();++k)for(const auto& path:projected[k]){zPointArray p;
+    zFnGraph(const_cast<zObjGraph&>(path.graph)).getVertexPositions(p);
+    rayTargets[k].insert(rayTargets[k].end(),p.begin(),p.end());
+    rayNormals[k].insert(rayNormals[k].end(),path.normals.begin(),path.normals.end());}
+  std::vector<zFloatArray> exactHeights;
+  require(zTsRelax::measureTargetHeights(rayLayers,rayTargets,rayNormals,exactHeights,status,false),status);
+  for(size_t k=0;k<projected.size();++k){size_t cursor=0;for(auto& path:projected[k]){
+    const size_t count=path.heights.size();path.heights.assign(exactHeights[k].begin()+cursor,exactHeights[k].begin()+cursor+count);cursor+=count;}}
+  checkUniform(projected,.5);
+  require(zPrintSyn::linkPrintPaths(projected,combined,status),status);
+  checkUniform(PrintPathArray{{combined}},.5);
+  const auto firstRayNormal=rayNormals[0][0];rayNormals[0][0]=zVector(1,0,0);
+  require(!zTsRelax::measureTargetHeights(rayLayers,rayTargets,rayNormals,exactHeights,status,false)&&exactHeights.empty(),
+          "Unsupported TCP ray was plane-extrapolated or retained stale heights");
+  rayNormals[0][0]=firstRayNormal;
   const auto rejectTables = [&]() {
-    require(!zPrintSyn::projectPrintPaths(paths2D, slicer->getIsoMeshes2D(), slicer->getIsoMeshes(),
+    require(!zPrintSyn::projectPrintPaths(paths2D, printCharts, printSections,
         nullptr, projected, status, nullptr, false, &perLayer), "Invalid height tables accepted");
     require(projected.empty(), "Invalid projection retained stale paths");
   };
   perLayer[0].pop_back();
   rejectTables();
-  perLayer = heights;
+  perLayer.assign(heights.begin()+1,heights.end());
   perLayer[1][0] = std::numeric_limits<float>::quiet_NaN();
   rejectTables();
   perLayer[1][0] = -1.0f;
@@ -468,7 +539,9 @@ void harmonic() {
   auto tapered = block();
   zFnMesh taperedFn(tapered);
   points = taperedFn.getRawVertexPositions();
-  for (int i = 0; i < taperedFn.numVertices(); ++i) points[i].x *= 1.0 + 0.15 * points[i].z;
+  // A contracting wall retains physical previous-layer support while still
+  // exercising spatially varying harmonic heights.
+  for (int i = 0; i < taperedFn.numVertices(); ++i) points[i].x *= 1.0 - 0.15 * points[i].z;
   zTsSlicing varying;
   configure(varying, tapered);
   varying.setSlicerMode(zTsSlicerMode::Harmonic);
@@ -480,6 +553,16 @@ void harmonic() {
   require(varying.computePostProcess(false), varying.getStatus());
   require(varying.getPrintHeightDomain().min > 0 && varying.getPrintVolume() > 0,
           "Varying harmonic heights were lost during post-processing");
+  // The previous positive fixture widened so far that several current TCP
+  // normals missed the prior trimmed section. Preserve that physical failure.
+  auto expanding=block();zFnMesh expandingFn(expanding);auto* expandingPoints=expandingFn.getRawVertexPositions();
+  for(int i=0;i<expandingFn.numVertices();++i)expandingPoints[i].x*=1.0+.15*expandingPoints[i].z;
+  zTsSlicing unsupported;configure(unsupported,expanding);unsupported.setSlicerMode(zTsSlicerMode::Harmonic);
+  require(unsupported.computeSlicer(false),unsupported.getStatus());
+  require(!unsupported.computePostProcess(false)&&unsupported.getStatus().find("previous-layer support")!=std::string::npos,
+          "Unsupported expanding TCP fixture was plane-extrapolated into a valid path");
+  require(!unsupported.hasPrintStatistics()&&zFnGraph(const_cast<PrintPath&>(unsupported.getResultantPrintPath()).graph).numVertices()==0,
+          "Unsupported TCP retained a fabrication result/statistics");
 
   // An unusable gradient must fail and clear the previous successful output.
   auto &tet = const_cast<HarmonicField &>(slicer->getTetVolume());
@@ -522,6 +605,15 @@ void harmonic() {
     require(n.z>0,"Surface/count feedback lost fabrication normal orientation");
   require(adaptive.getHarmonicSlicer()->getIsoMeshes().size()<impossible.getHarmonicSlicer()->getIsoMeshes().size(),"Adaptive count did not remove an unnecessary layer");
   for(float h:adaptive.getResultantPrintPath().heights)require(h>=.8&&h<=1,"Count adaptation claimed a false domain");
+  zTsSlicing budgeted;configure(budgeted,mesh);budgeted.setSlicerMode(zTsSlicerMode::Harmonic);
+  auto &budget=budgeted.getSettings().HPrintHeight;budget=target;
+  budget.AllowLayerCountChange=true;budget.Iterations=1;
+  require(budgeted.computeSlicer(false),budgeted.getStatus());
+  require(!budgeted.computePostProcess(false),"Exhausted correction budget silently produced a fabrication path");
+  const auto &budgetReport=budgeted.getHarmonicSlicer()->getPrintHeightOptimizationReport();
+  require(budgetReport.OuterIterations<=budget.Iterations,
+          "Feedback or count candidates reset the shared surface correction budget");
+  require(!budgetReport.Converged&&!budgeted.hasPrintStatistics(),"Budget exhaustion falsely reported height compliance");
   zTsSlicing scheduled;configure(scheduled,mesh);scheduled.setSlicerMode(zTsSlicerMode::Harmonic);
   auto &schedule=scheduled.getSettings().HPrintHeight;schedule=target;schedule.OptimizeSurfaces=false;
   require(scheduled.computeSlicer(false)&&scheduled.computePostProcess(false),scheduled.getStatus());
