@@ -37,10 +37,15 @@ struct PrintSynSetting {
   // sampler does not use this setting or add curvature-support targets.
   double SurfaceChordTolerance = 0.1;
   // Angle between the incident edges, in degrees. Strictly less than this
-  // threshold selects a feature; equality is excluded (straight = 180).
+  // threshold selects an inner reconstruction/sampling support; equality is
+  // excluded (straight = 180). Uniform outer runs and junction feature selection
+  // do not add targets at these geometric supports.
   float FeatureAngleTol = 90.0f;
   float SeamOffset = 0.0f;
   float SeamSize = 0.0f;
+  // Independent nominal chart-arc spacing for inner/untagged runs, in mm.
+  // Appended to preserve all preceding field offsets; rebuild native consumers.
+  float InnerResampleLength = 20.0f;
 };
 
 /*! \class zPrintSyn
@@ -68,12 +73,16 @@ public:
 
   // Current geometric corners (open endpoints excluded), using FeatureAngleTol.
   static zIntArray cornerVertexIds(const PrintPath &path, float angleThreshold);
-  // Re-detect current geometric corners; recorded metadata does not create
-  // feature targets or override the supplied angle threshold.
+  // Distinct incident outer side tags (3..6), using actual graph adjacency.
+  // Track metadata, when present, must mark the vertex outer (>=0.5). Angle
+  // threshold is retained for source/ABI compatibility and is ignored.
   static zIntArray featureVertexIds(const PrintPath &path, float fallbackAngleThreshold);
+  // Replace featureFlags with aligned OuterJunctionFeature/0 metadata. Invalid
+  // edge/track arrays return false without modifying the existing metadata.
+  static bool refreshJunctionFeatures(PrintPath &path);
   // Reconstruct XY corner groups from two non-corner vertices on each side.
   // Parallel/degenerate groups or groups without enough support are preserved.
-  // Re-detects corners from geometry and refreshes featureFlags after rebuilding.
+  // Production uses this only for inner/untagged runs, never outer runs.
   static bool reconstructCorners(PrintPath &path, float angleThreshold);
 
 
@@ -111,7 +120,10 @@ public:
   // Geometric corners and categorical transitions closer than 0.01 mm along
   // the chart or printable section coalesce before global budget allocation.
   // Exact corner coordinates win over transition coordinates. Dense ordinary
-  // contour vertices are retained; fixed tag counts must fit this clearance.
+  // contour vertices define the reference arc. Each outer piece is sampled
+  // uniformly from endpoint to endpoint with shared per-tag count budgets.
+  // Tag0 runs reconstruct privately with fixed shared endpoints, then use
+  // independent InnerResampleLength steps; their counts may vary across layers.
   static bool resampleFaceTaggedPaths(PrintPathArray &paths, const std::vector<zTsField::FaceTagSource> &sources,
       const PrintSynSetting &settings, std::string &status,
       const zObjMeshArray *charts2D = nullptr, const zObjMeshArray *sections3D = nullptr);
@@ -122,8 +134,9 @@ public:
       const zObjMeshArray *charts2D, const zObjMeshArray *sections3D, bool useParallel);
 
   /*! \brief Step 1: resamples (corner-preserving), glitch-filters and
-   * orients every 2D print path in place. Re-detects geometric features and
-   * merges consecutive targets closer than 0.01 mm.
+   * orients every 2D print path in place. Untagged paths reconstruct corners
+   * and use InnerResampleLength; labeled outer paths do not reconstruct.
+   * Only outer junctions are features. Merges targets closer than 0.01 mm.
    * Bad layers: a first path that was
    * closed before and is open after. */
   static bool resamplePrintPaths(PrintPathArray &ioPaths2D,

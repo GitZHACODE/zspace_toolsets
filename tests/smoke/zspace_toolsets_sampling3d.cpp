@@ -12,10 +12,13 @@ void check(bool closed){
   PrintPath path;zPointArray p=closed?zPointArray{{1,1,0},{1.01f,1,0},{9,1,0},{9,3,0},{1,3,0}}:zPointArray{{1,1,0},{2,1,0},{2.01f,1,0},{6,3,0},{9,3,0}};
   zIntArray edges={0,1,1,2,2,3,3,4};if(closed){edges.push_back(4);edges.push_back(0);}zFnGraph(path.graph).create(p,edges);
   path.widths.assign(p.size(),.4f);path.trackIds.assign(p.size(),7);
-  path.featureFlags=closed?zIntArray{1,2,1,2,1}:zIntArray{0,PrintPath::AngleFeature,PrintPath::IntersectionFeature,0,0};
+  path.edgeFaceTags=closed?zIntArray{3,4,5,6,4}:zIntArray{3,4,5,5};
+  require(zPrintSyn::refreshJunctionFeatures(path),"Cannot initialize standalone junction anchors");
   PrintPathArray two{{path}},three;zObjMeshArray charts{chart},sections{section};std::string error;
   std::vector<zFloatArray> h{{1,1,3,3}};std::vector<zVectorArray> n{zVectorArray(4,zVector(0,0,1))};
   require(zPrintSyn::projectPrintPaths(two,charts,sections,nullptr,three,error,nullptr,false,&h,&n),error.c_str());
+  const auto sourceFeatures=three[0][0].featureFlags;
+  require(sourceFeatures==path.featureFlags,"Projection changed source junction masks");
   zPointArray original;zFnGraph(three[0][0].graph).getVertexPositions(original);
   PrintSynSetting settings;settings.ResampleLength=3;
   require(zPrintSyn::resamplePrintPaths3D(two,three,charts,sections,settings,error,false,nullptr,&h,&n),error.c_str());
@@ -27,10 +30,10 @@ void check(bool closed){
     require(std::abs(result.heights[j]-(1+.5*out[j].y))<3e-6,"Existing mesh-height interpolation changed");
     require(result.trackIds[j]==7,"Track identity changed");
     if(result.featureFlags[j]==0){bool endpoint=!closed&&(distance(out[j],original.front())==0||distance(out[j],original.back())==0);if(endpoint)continue;++ordinary;
-      for(size_t f=0;f<original.size();++f)if(path.featureFlags[f]||(!closed&&(f==0||f+1==original.size())))require(distance(out[j],original[f])>=1.5-2e-5,"Ordinary 3D sample crowds a mandatory target");}
+      for(size_t f=0;f<original.size();++f)if(sourceFeatures[f]||(!closed&&(f==0||f+1==original.size())))require(distance(out[j],original[f])>=1.5-2e-5,"Ordinary 3D sample crowds a mandatory target");}
   }
-  for(size_t f=0;f<original.size();++f)if(path.featureFlags[f]||(!closed&&(f==0||f+1==original.size()))){bool found=false;
-    for(size_t j=0;j<out.size();++j)if(distance(out[j],original[f])==0&&result.featureFlags[j]==path.featureFlags[f])found=true;
+  for(size_t f=0;f<original.size();++f)if(sourceFeatures[f]||(!closed&&(f==0||f+1==original.size()))){bool found=false;
+    for(size_t j=0;j<out.size();++j)if(distance(out[j],original[f])==0&&result.featureFlags[j]==sourceFeatures[f])found=true;
     require(found,"A mandatory short-span/closure feature moved or disappeared");}
   if(!closed)require(ordinary>0,"3D fixture produced no ordinary samples");
   std::vector<zTsUtils::GraphPolyline> curves;require(zTsUtils::graphPolylines(result.graph,curves)&&curves.size()==1&&curves[0].Closed==closed,"Second sampling changed curve topology");

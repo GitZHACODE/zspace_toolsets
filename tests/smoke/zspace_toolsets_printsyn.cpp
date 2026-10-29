@@ -88,7 +88,7 @@ void aligned(const PrintPath &p) {
 PrintPath resample(PrintPath input, float spacing, float angle) {
   PrintPathArray layers{{input}};
   PrintSynSetting settings;
-  settings.ResampleLength = spacing; settings.FeatureAngleTol = angle;
+  settings.ResampleLength = spacing;settings.InnerResampleLength=spacing; settings.FeatureAngleTol = angle;
   std::string status;
   std::vector<int> bad;
   require(zPrintSyn::resamplePrintPaths(layers, settings, status, &bad, false), status);
@@ -97,10 +97,62 @@ PrintPath resample(PrintPath input, float spacing, float angle) {
   return layers[0][0];
 }
 zObjMesh chart();
+void junctionFeatures(){
+  // Two geometric turns bracket a straight side-ownership junction. Only the
+  // latter is a fabrication feature, independent of the angle setting.
+  auto source=path({{.1f,.1f,0},{.6f,.1f,0},{.85f,.35f,0},{1.1f,.6f,0},{1.6f,.6f,0}});
+  source.edgeFaceTags={6,6,3,3};source.trackIds.assign(5,1);
+  source.featureFlags={0,PrintPath::AngleFeature,0,PrintPath::IntersectionFeature,0};
+  require(zPrintSyn::cornerVertexIds(source,150)==zIntArray({1,3}),"Junction fixture lost its ordinary geometric turns");
+  for(float angle:{0.f,90.f,150.f,180.f})require(zPrintSyn::featureVertexIds(source,angle)==zIntArray{2},"Junction selection depends on angle or legacy masks");
+  require(zPrintSyn::refreshJunctionFeatures(source)&&source.featureFlags==zIntArray({0,0,4,0,0}),"Dedicated junction flags are incorrect");
+  for(auto tags:{zIntArray{},zIntArray{6,0,0,3},zIntArray{3,3,3,3},zIntArray{6,1,2,3}}){
+    auto excluded=source;excluded.edgeFaceTags=tags;require(zPrintSyn::featureVertexIds(excluded,150).empty(),"Slot/internal/missing ownership created a feature");}
+  auto inner=source;inner.trackIds.assign(5,0);require(zPrintSyn::featureVertexIds(inner,150).empty(),"Inner track became a feature");
+  // Vertex/edge storage order is deliberately unrelated to path adjacency.
+  const auto points=positions(source);zPointArray permuted{points[3],points[0],points[4],points[2],points[1]};
+  auto shuffled=path(permuted);zIntArray shuffledEdges{3,0,1,4,0,2,4,3};
+  zFnGraph(shuffled.graph).create(permuted,shuffledEdges);shuffled.edgeFaceTags={3,6,3,6};shuffled.trackIds.assign(5,1);
+  require(zPrintSyn::featureVertexIds(shuffled,0)==zIntArray{3},"Feature selection used vertex order instead of graph incidence");
+  auto sampled=resample(source,.17f,150);const auto junction=findPoint(sampled,points[2]);
+  require(sampled.featureFlags[junction]==PrintPath::OuterJunctionFeature,"Straight junction was dropped by sampling");
+  for(int id:{1,3})require(sampled.featureFlags[findPoint(sampled,points[id])]==0,"Geometric support was promoted to a feature");
+  auto originalBevel=path({{0,0,0},{1,0,0},{1.8f,0,0},{2,.2f,0},{2,1,0},{2,2,0}});
+  originalBevel.edgeFaceTags.assign(5,3);originalBevel.trackIds.assign(6,1);
+  auto bevel=resample(originalBevel,.17f,150);
+  findPoint(bevel,{1.8f,0,0});findPoint(bevel,{2,.2f,0});
+  for(const auto &p:positions(bevel))require(zTsUtils::vecDistSq(p,{2,0,0})>1e-12,"Production sampling inserted a reconstructed intersection");
+  originalBevel.edgeFaceTags.assign(5,3);originalBevel.trackIds.assign(6,0);
+  auto innerBevel=resample(originalBevel,.17f,150);findPoint(innerBevel,{2,0,0});
+  require(zPrintSyn::featureVertexIds(innerBevel,150).empty(),"Inner reconstruction created an outer junction");
+  PrintPathArray inheritedInner{{originalBevel}};PrintSynSetting independent;
+  independent.ResampleLength=.17f;independent.InnerResampleLength=20;independent.FeatureAngleTol=150;std::string innerStatus;
+  require(zPrintSyn::resamplePrintPaths(inheritedInner,independent,innerStatus,nullptr,false),innerStatus);
+  findPoint(inheritedInner[0][0],{2,0,0});
+  require(positions(inheritedInner[0][0]).size()==3&&std::all_of(inheritedInner[0][0].edgeFaceTags.begin(),inheritedInner[0][0].edgeFaceTags.end(),[](int tag){return tag==0;}),
+    "Pure-inner inherited side labels bypassed independent20mm reconstruction/sampling");
+  PrintPathArray mapped;PrintPath linked;std::string status;
+  require(zPrintSyn::projectPrintPaths({{sampled},{sampled}},{chart(),chart()},{chart(),chart()},nullptr,mapped,status,nullptr,false),status);
+  for(const auto &layer:mapped)require(layer[0].featureFlags==sampled.featureFlags,"Projection changed junction identity");
+  require(zPrintSyn::linkPrintPaths(mapped,linked,status),status);
+  require(zPrintSyn::featureVertexIds(linked,0).size()==2&&
+    std::count(linked.featureFlags.begin(),linked.featureFlags.end(),PrintPath::OuterJunctionFeature)==2,
+    "Link travel edge created or removed a junction");
+  // Both windings exercise label-preserving reversal and seam splitting.
+  for(bool clockwise:{false,true}){
+    auto ring=path({{.2f,.2f,0},{1,.2f,0},{1.8f,.2f,0},{1.8f,1.8f,0},{.2f,1.8f,0}},true);
+    ring.edgeFaceTags={6,3,3,3,6};ring.trackIds.assign(5,1);
+    if(clockwise){auto p=positions(ring);std::reverse(p.begin(),p.end());ring=path(p,true);ring.edgeFaceTags={3,3,3,6,6};ring.trackIds.assign(5,1);}
+    ring=resample(ring,.17f,150);PrintPathArray layers{{ring}};
+    require(zPrintSyn::alignStartPoints(layers,{chart()},.11,0,status,nullptr,false),status);
+    const auto &out=layers[0][0];require(zPrintSyn::featureVertexIds(out,0).size()==2,"Reversal/seam changed outer junction count");
+    for(size_t v=0;v<out.featureFlags.size();++v)require(out.featureFlags[v]==0||out.featureFlags[v]==PrintPath::OuterJunctionFeature,"Seam exported legacy angle flags");
+  }
+}
 void surfaceContourOutput(){
   zPointArray p;for(int i=0;i<100;++i){const double angle=i*6.283185307179586/100;p.emplace_back(1+.8*std::cos(angle),1+.8*std::sin(angle),0);}
   auto raw=path(p,true);raw.trackIds.assign(p.size(),0);raw.featureFlags.assign(p.size(),0);raw.featureFlags[50]=PrintPath::AngleFeature|PrintPath::IntersectionFeature;
-  zObjMeshArray charts{chart()},sections{chart()};PrintSynSetting settings;settings.ResampleLength=.5f;settings.FeatureAngleTol=0;settings.SeamOffset=0;settings.SeamSize=0;
+  zObjMeshArray charts{chart()},sections{chart()};PrintSynSetting settings;settings.ResampleLength=.5f;settings.InnerResampleLength=.5f;settings.FeatureAngleTol=0;settings.SeamOffset=0;settings.SeamSize=0;
   PrintPathArray first{{raw}},second=first,a,b,hidden;PrintPath ca,cb;std::string sa,sb;
   require(zPrintSyn::computePipeline(charts,sections,nullptr,zPrintSyn::SeamMapping::WorldNearest,settings,first,a,ca,sa,false),sa);
   zTsUtils::clearSlicingTimings(); zTsUtils::setSlicingTimingsEnabled(true);
@@ -114,7 +166,7 @@ void surfaceContourOutput(){
         std::string("Missing postprocessing timing: ")+name);
   require(std::none_of(timingRows.begin(),timingRows.end(),[](const auto &row){
       return row.name=="PrintSyn.resamplePrintPaths3D" || row.name=="PrintSyn.resampleMapped";}),
-      "Production pipeline still runs a second resampling pass");
+      "Production pipeline runs a second resampling pass");
   zTsUtils::clearSlicingTimings();
   const auto compare=[](const PrintPath &a,const PrintPath &b){const auto p=positions(a),q=positions(b);require(p.size()==q.size(),"Hidden output changed target count");
     for(size_t i=0;i<p.size();++i)require(zTsUtils::vecDistSq(p[i],q[i])==0,"Hidden output changed target geometry");
@@ -161,7 +213,7 @@ void resampling() {
   require(zPrintSyn::cornerVertexIds(corner, 91) == zIntArray{1}, "Above threshold missed a corner");
   auto sampled = resample(corner, 0.2f, 91);
   size_t id = findPoint(sampled, {1.005,0,0});
-  require(sampled.featureFlags[id] & PrintPath::AngleFeature, "Lost angle identity");
+  require(sampled.featureFlags[id]==0&&zPrintSyn::featureVertexIds(sampled,91).empty(), "Angle support became a junction feature");
   require(std::abs(sampled.widths[id] - corner.widths[1]) < 1e-7 &&
       sampled.heights[id] == corner.heights[1] && sampled.trackIds[id] == corner.trackIds[1],
       "Nearby regular sample replaced a corner's attributes");
@@ -173,7 +225,7 @@ void resampling() {
   for(size_t e=0;e<weldedEdges.size();e+=2)require(zTsUtils::vecDistSq(welded[weldedEdges[e]],welded[weldedEdges[e+1]])>=.0001,
       "Nearby targets did not merge at 0.01 mm");
   PrintPathArray tiny{{path({{0,0,0},{.0004f,0,0},{.0004f,.0003f,0},{0,.0003f,0}},true)}};
-  PrintSynSetting tinySettings;tinySettings.ResampleLength=.0001f;tinySettings.FeatureAngleTol=91;std::string tinyStatus;
+  PrintSynSetting tinySettings;tinySettings.ResampleLength=.0001f;tinySettings.InnerResampleLength=.0001f;tinySettings.FeatureAngleTol=91;std::string tinyStatus;
   require(!zPrintSyn::resamplePrintPaths(tiny,tinySettings,tinyStatus,nullptr,false),"A sub-tolerance loop retained invalid targets");
 
   // Historical metadata does not turn a straight point into an anchor.
@@ -197,6 +249,9 @@ void resampling() {
   // Valid endpoints still survive spacing larger than the whole path.
   sampled = resample(path({{0,0,0},{0.02f,0,0}}), 1, 90);
   require(positions(sampled).size() == 2, "Open path lost a separated endpoint");
+  sampled=resample(path({{0,0,0},{1,0,0},{1,1,0},{0,1,0}},true),20,90);
+  require(positions(sampled).size()>=3&&zTsUtils::isClosedGraph(sampled.graph),
+    "Coarse nominal inner spacing collapsed a generic closed path");
   for(bool reverse:{false,true}){
     zPointArray points{{.005f,0,0},{1,0,0},{1,1,0},{0,1,0},{0,0,0}};
     if(reverse){std::reverse(points.begin(),points.end());
@@ -285,13 +340,13 @@ void mapping() {
   for (auto strategy : {zPrintSyn::SeamMapping::SharedTopology, zPrintSyn::SeamMapping::WorldNearest}) {
     PrintPathArray paths{{input},{input}};
     PrintSynSetting settings;
-    settings.ResampleLength = 0.17f; settings.FeatureAngleTol = 91;
+    settings.ResampleLength = 0.17f;settings.InnerResampleLength=.17f; settings.FeatureAngleTol = 91;
     settings.SeamOffset = 0.11f;
     require(zPrintSyn::computePipeline(charts, sections, nullptr, strategy, settings,
         paths, mapped, combined, status, false, &heights), status);
     for (int l = 0; l < 2; ++l) {
       aligned(paths[l][0]); aligned(mapped[l][0]);
-      for (size_t i = 0; i < source.size(); ++i) if (input.featureFlags[i]) {
+      for (int i : zPrintSyn::cornerVertexIds(input,91)) {
         const auto id = findPoint(mapped[l][0], expected(source[i], l), 3e-6);
         require(mapped[l][0].featureFlags[id] == input.featureFlags[i], "Seam/projection lost feature");
         const auto linked = findPoint(combined, expected(source[i], l), 3e-6);
@@ -303,7 +358,8 @@ void mapping() {
   // and the new endpoint must stay aligned. The last square corner is cut.
   auto square = path({{0.2,0.2,0},{1.8,0.2,0},{1.8,1.8,0},{0.2,1.8,0}}, true);
   square.featureFlags.assign(4, PrintPath::AngleFeature);
-  square.trackIds.assign(4, 0);
+  square.trackIds.assign(4, 1);square.edgeFaceTags={3,4,5,6};
+  require(zPrintSyn::refreshJunctionFeatures(square),"Cannot initialize junction metadata");
   PrintPathArray gap{{square}};
   std::vector<int> bad;
   require(zPrintSyn::alignStartPoints(gap, zObjMeshArray{chart()}, 0, 1.8,
@@ -311,10 +367,11 @@ void mapping() {
   aligned(gap[0][0]);
   require(!zTsUtils::isClosedGraph(gap[0][0].graph) &&
       std::count_if(gap[0][0].featureFlags.begin(), gap[0][0].featureFlags.end(),
-          [](int flag) { return flag != 0; }) == 3, "Explicit seam cut wrong feature set");
-  for (const zPoint &p : zPointArray{{0.2,0.2,0},{1.8,0.2,0},{1.8,1.8,0}})
-    require(gap[0][0].featureFlags[findPoint(gap[0][0], p)] & PrintPath::AngleFeature,
-        "Seam removed a feature outside the cut arc");
+          [](int flag) { return flag != 0; }) == 2, "Explicit seam cut wrong junction set");
+  require(gap[0][0].featureFlags[findPoint(gap[0][0],{.2f,.2f,0})]==0,"Open seam endpoint became a junction");
+  for (const zPoint &p : zPointArray{{1.8,0.2,0},{1.8,1.8,0}})
+    require(gap[0][0].featureFlags[findPoint(gap[0][0], p)]==PrintPath::OuterJunctionFeature,
+        "Seam removed an outer junction outside the cut arc");
   require(gap[0][0].featureFlags[findPoint(gap[0][0], {0.4,1.8,0}, 1e-6)] == 0,
       "Interpolated seam endpoint acquired a false feature mask");
   gap = {{square}}; gap[0][0].featureFlags.pop_back();
@@ -358,6 +415,7 @@ void slicerIntegration(zTsSlicerMode mode) {
   zIntArray counts(10,4), faces{0,3,2,1,8,9,10,11,0,1,5,4,1,2,6,5,2,3,7,6,3,0,4,7,
       4,5,9,8,5,6,10,9,6,7,11,10,7,4,8,11}, tags(10,Side);
   tags[0] = Bottom; tags[1] = Top;
+  for(int f=2;f<10;++f)tags[f]=3+(f-2)%4;
   zFnMesh(mesh).create(p, counts, faces);
   zIntArray serialFlags;
   for (bool parallel : {false,true}) {
@@ -391,7 +449,7 @@ void slicerIntegration(zTsSlicerMode mode) {
 }
 int main() {
   try {
-    timingChecks(); surfaceContourOutput(); resampling(); mapping(); slicerIntegration(zTsSlicerMode::Topology);
+    timingChecks(); junctionFeatures(); surfaceContourOutput(); resampling(); mapping(); slicerIntegration(zTsSlicerMode::Topology);
 #ifdef ZSPACE_TOOLSETS_WITH_TETGEN
     slicerIntegration(zTsSlicerMode::Harmonic);
 #endif

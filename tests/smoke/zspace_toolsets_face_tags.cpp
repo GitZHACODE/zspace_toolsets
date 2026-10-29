@@ -110,7 +110,9 @@ void projectedAnchors() {
     if(!l)expected=actual;else require(actual==expected,"Projected-anchor repair changed the cross-layer budget");
   }
   for(const auto &layer:paths){const auto &p=layer[0];
-    require(zPrintSyn::featureVertexIds(p,91)==zPrintSyn::cornerVertexIds(p,91),"Projected repair used historical feature masks");
+    zIntArray flagged;for(int i=0;i<int(p.featureFlags.size());++i)if(p.featureFlags[i]){
+      require(p.featureFlags[i]==PrintPath::OuterJunctionFeature,"Projected repair retained an angle feature");flagged.push_back(i);}
+    require(zPrintSyn::featureVertexIds(p,91)==flagged,"Projected repair junction metadata is stale");
     require(std::none_of(p.featureFlags.begin(),p.featureFlags.end(),[](int mask){return mask&PrintPath::IntersectionFeature;}),
       "Projected repair retained stale intersection identities");}
   PrintPathArray mapped(2);zFloatArray heights(4,.2f);

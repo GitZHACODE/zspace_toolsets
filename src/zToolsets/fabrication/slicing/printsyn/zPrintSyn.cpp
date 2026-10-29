@@ -86,6 +86,38 @@ void detectFeatureAngles(const zPointArray &positions,
   }
 }
 
+// Rebuild categorical metadata after a topology-preserving reorder/split/cut.
+// Side ownership is carried on edges; minimum incident side labels on vertices
+// are display/export data and cannot by themselves identify junctions.
+bool refreshSideMetadata(PrintPath &path) {
+  zFnGraph fn(path.graph);const int n=fn.numVertices();zIntArray edges;fn.getEdgeData(edges);
+  if(!path.edgeFaceTags.empty()&&path.edgeFaceTags.size()!=edges.size()/2)return false;
+  path.faceTags.assign(n,0);path.faceTagSegments.clear();
+  std::unordered_map<unsigned long long,int> labels;
+  for(size_t e=0;e<path.edgeFaceTags.size();++e){const int a=edges[2*e],b=edges[2*e+1],tag=path.edgeFaceTags[e];
+    labels[makeEdgeKey(a,b)]=tag;
+    for(int v:{a,b})if(tag>=3&&tag<=6&&(!path.faceTags[v]||tag<path.faceTags[v]))path.faceTags[v]=tag;
+  }
+  if(!labels.empty()){
+    std::vector<GraphPolyline> curves;if(!graphPolylines(path.graph,curves))return false;
+    for(const auto &curve:curves){const int count=int(curve.Vertices.size()),edgeCount=count-(curve.Closed?0:1);
+      if(edgeCount<1)continue;zIntArray tags;tags.reserve(edgeCount);
+      for(int i=0;i<edgeCount;++i)tags.push_back(labels.at(makeEdgeKey(curve.Vertices[i],curve.Vertices[(i+1)%count])));
+      int start=0;if(curve.Closed)for(int i=0;i<edgeCount;++i)if(tags[i]!=tags[(i+edgeCount-1)%edgeCount]){start=i;break;}
+      PrintPath::FaceTagSegment segment;
+      for(int k=0;k<edgeCount;++k){const int e=(start+k)%edgeCount,tag=tags[e],a=curve.Vertices[e],b=curve.Vertices[(e+1)%count];
+        if(segment.vertices.empty()||segment.tag!=tag){
+          if(segment.tag>=3&&segment.tag<=6)path.faceTagSegments.push_back(std::move(segment));
+          segment=PrintPath::FaceTagSegment();segment.tag=tag;segment.vertices.push_back(a);
+        }
+        segment.vertices.push_back(b);
+      }
+      if(segment.tag>=3&&segment.tag<=6)path.faceTagSegments.push_back(std::move(segment));
+    }
+  }
+  return zPrintSyn::refreshJunctionFeatures(path);
+}
+
 // Fixed-spacing arc-length resample of a single ioPath.graph, carrying
 // widths/heights/normals along.
 bool resampleSinglePath(PrintPath &ioPath, float resampleLength,
@@ -97,14 +129,15 @@ bool resampleSinglePath(PrintPath &ioPath, float resampleLength,
     zTsUtils::printDebug("[resampleSinglePath] ResampleLength must be finite and at least 1e-4 mm.");
     return false;
   }
-  const float sampleLength = resampleLength;
+  float sampleLength = resampleLength;
   if (N < 2)
     return false;
   if ((!ioPath.widths.empty() && ioPath.widths.size() != size_t(N)) ||
       (!ioPath.heights.empty() && ioPath.heights.size() != size_t(N)) ||
       (!ioPath.normals.empty() && ioPath.normals.size() != size_t(N)) ||
       (!ioPath.trackIds.empty() && ioPath.trackIds.size() != size_t(N)) ||
-      (!ioPath.featureFlags.empty() && ioPath.featureFlags.size() != size_t(N))) return false;
+      (!ioPath.featureFlags.empty() && ioPath.featureFlags.size() != size_t(N)) ||
+      (!ioPath.edgeFaceTags.empty()&&ioPath.edgeFaceTags.size()!=size_t(fnGraph.numEdges()))) return false;
 
   std::vector<GraphPolyline> curves;
   if (!graphPolylines(ioPath.graph, curves) || curves.size() != 1 ||
@@ -124,6 +157,7 @@ bool resampleSinglePath(PrintPath &ioPath, float resampleLength,
     // Open endpoints are mandatory, but are not angle features.
     if (!closed && (i == sequence.front() || i == sequence.back())) featureFlags[i] = 0;
   }
+  for(int id:zPrintSyn::featureVertexIds(ioPath,0))featureFlags[id]|=PrintPath::OuterJunctionFeature;
 
   const zFloatArray &weights = ioPath.widths;
   const zFloatArray &heights = ioPath.heights;
@@ -140,6 +174,7 @@ bool resampleSinglePath(PrintPath &ioPath, float resampleLength,
   zFloatArray outTrackIds;
   zIntArray outEdges;
   zIntArray outFeatures;
+  std::vector<double> outArc;
   std::vector<char> outRequired;
 
   const auto popPoint = [&]() {
@@ -147,16 +182,16 @@ bool resampleSinglePath(PrintPath &ioPath, float resampleLength,
     if (hasHeights) outHeights.pop_back();
     if (hasNormals) outNormals.pop_back();
     if (hasTrackIds) outTrackIds.pop_back();
-    outFeatures.pop_back(); outRequired.pop_back();
+    outFeatures.pop_back(); outRequired.pop_back();outArc.pop_back();
   };
 
   auto appendPoint = [&](const zPoint &p, float w, float h, const zVector &nrm,
-                          float trk, int features, bool required) {
+                          float trk, int features, bool required,double arc) {
     // Keep the historical 0.01 mm weld, preferring an exact geometric corner
     // or endpoint over an ordinary target. Metadata never creates anchors.
     const double clearance = 0.01;
     while (required && !outPoints.empty() &&
-           (!outRequired.back() || (features && !outFeatures.back())) &&
+           (!outRequired.back() || ((features&PrintPath::AngleFeature) && !(outFeatures.back()&PrintPath::AngleFeature))) &&
            vecDistSq(p, outPoints.back()) < clearance * clearance) popPoint();
     if (!outPoints.empty()) {
       if (vecDistSq(p, outPoints.back()) < clearance * clearance) {
@@ -173,6 +208,7 @@ bool resampleSinglePath(PrintPath &ioPath, float resampleLength,
       outTrackIds.push_back(trk);
     outFeatures.push_back(features);
     outRequired.push_back(required);
+    outArc.push_back(arc);
   };
 
   auto weightAt = [&](int id) {
@@ -194,11 +230,23 @@ bool resampleSinglePath(PrintPath &ioPath, float resampleLength,
   };
 
   const int numSegments = closed ? N : (N - 1);
+  std::vector<double> sourceArc(numSegments+1,0);zIntArray sourceTags;
+  std::unordered_map<unsigned long long,int> labels;zIntArray sourceEdges;fnGraph.getEdgeData(sourceEdges);
+  for(size_t e=0;e<ioPath.edgeFaceTags.size();++e)labels[makeEdgeKey(sourceEdges[2*e],sourceEdges[2*e+1])]=ioPath.edgeFaceTags[e];
+  for(int seg=0;seg<numSegments;++seg){const int a=sequence[seg],b=sequence[(seg+1)%N];
+    sourceArc[seg+1]=sourceArc[seg]+vecSub(positions[b],positions[a]).length();
+    if(!labels.empty())sourceTags.push_back(labels.at(makeEdgeKey(a,b)));
+  }
+  if(closed){int mandatory=1;
+    for(int id:sequence)if(id!=sequence.front()&&featureFlags[id])++mandatory;
+    if(mandatory<3)sampleLength=(std::min)(sampleLength,float(sourceArc.back()/3));
+    if(!std::isfinite(sampleLength)||sampleLength<=0)return false;
+  }
 
   // Emit the path's start vertex and reset the sampling phase there.
   const int firstId = sequence[0];
   appendPoint(positions[firstId], weightAt(firstId), heightAt(firstId),
-              normalAt(firstId), trackAt(firstId), featureFlags[firstId], true);
+              normalAt(firstId), trackAt(firstId), featureFlags[firstId], true,0);
   double distSinceSample = 0.0;
 
   for (int seg = 0; seg < numSegments; seg++) {
@@ -233,7 +281,7 @@ bool resampleSinglePath(PrintPath &ioPath, float resampleLength,
           interpN = zVector(0, 0, 1);
         const float interpTrk =
             (trk0 + t * (trk1 - trk0)) >= 0.5f ? 1.0f : 0.0f;
-        appendPoint(interpP, interpW, interpH, interpN, interpTrk, 0, false);
+        appendPoint(interpP, interpW, interpH, interpN, interpTrk, 0, false,sourceArc[seg]+remaining);
         remaining += sampleLength;
       }
       distSinceSample = segLen - (remaining - sampleLength);
@@ -245,7 +293,7 @@ bool resampleSinglePath(PrintPath &ioPath, float resampleLength,
     const bool isFeature =
         (i1 < int(featureFlags.size())) && featureFlags[i1] != 0;
     if ((isLastOpenVertex || isFeature) && !(closed && i1 == firstId)) {
-      appendPoint(p1, w1, h1, n1, trk1, featureFlags[i1], true);
+      appendPoint(p1, w1, h1, n1, trk1, featureFlags[i1], true,sourceArc[seg+1]);
       distSinceSample = 0.0;
     }
   }
@@ -257,12 +305,13 @@ bool resampleSinglePath(PrintPath &ioPath, float resampleLength,
          vecDistSq(outPoints.front(), outPoints.back()) < closingClearance * closingClearance) {
     // A graph's arbitrary start can be an ordinary point just after a corner.
     // Preserve the real closing corner and all its attributes in that case.
-    if(outFeatures.back()&&!outFeatures.front()) {
+    if((outFeatures.back()&PrintPath::AngleFeature)&&!(outFeatures.front()&PrintPath::AngleFeature)) {
       outPoints.front()=outPoints.back();outWeights.front()=outWeights.back();
       if(hasHeights)outHeights.front()=outHeights.back();
       if(hasNormals)outNormals.front()=outNormals.back();
       if(hasTrackIds)outTrackIds.front()=outTrackIds.back();
       outFeatures.front()=outFeatures.back();outRequired.front()=true;
+      outArc.front()=outArc.back();
     }
     popPoint();
   }
@@ -292,16 +341,21 @@ bool resampleSinglePath(PrintPath &ioPath, float resampleLength,
   fnGraph.create(outPoints, outEdges);
   ioPath.widths = outWeights;
   ioPath.featureFlags = outFeatures;
+  ioPath.edgeFaceTags.clear();
+  if(!sourceTags.empty())for(size_t e=0;e<outEdges.size();e+=2){
+    const double a=outArc[outEdges[e]],b=outArc[outEdges[e+1]];
+    double midpoint=.5*(a+(b<a?b+sourceArc.back():b));
+    if(closed)midpoint=std::fmod(midpoint,sourceArc.back());
+    const int seg=(std::min)(numSegments-1,(std::max)(0,int(std::upper_bound(sourceArc.begin(),sourceArc.end(),midpoint)-sourceArc.begin())-1));
+    ioPath.edgeFaceTags.push_back(sourceTags[seg]);
+  }
   if (hasHeights)
     ioPath.heights = outHeights;
   if (hasNormals)
     ioPath.normals = outNormals;
   if (hasTrackIds)
     ioPath.trackIds = outTrackIds;
-  ioPath.featureFlags.assign(outPoints.size(),0);
-  for(int id:zPrintSyn::cornerVertexIds(ioPath,featureAngleTol))
-    ioPath.featureFlags[id]=PrintPath::AngleFeature;
-  return true;
+  return refreshSideMetadata(ioPath);
 }
 
 // Smooths localized width glitches (isolated spikes/dips) in ioPath.widths.
@@ -339,6 +393,10 @@ void reversePrintPath(PrintPath &ioPath) {
     return;
 
   const bool closed = isClosedGraph(ioPath.graph);
+  zIntArray oldEdges;fnGraph.getEdgeData(oldEdges);
+  std::unordered_map<unsigned long long,int> labels;
+  if(ioPath.edgeFaceTags.size()==oldEdges.size()/2)for(size_t e=0;e<ioPath.edgeFaceTags.size();++e)
+    labels[makeEdgeKey(oldEdges[2*e],oldEdges[2*e+1])]=ioPath.edgeFaceTags[e];
 
   std::reverse(positions.begin(), positions.end());
   if (!ioPath.widths.empty())
@@ -365,6 +423,10 @@ void reversePrintPath(PrintPath &ioPath) {
 
   fnGraph.clear();
   fnGraph.create(positions, newEdges);
+  ioPath.edgeFaceTags.clear();
+  if(!labels.empty())for(size_t e=0;e<newEdges.size();e+=2)
+    ioPath.edgeFaceTags.push_back(labels.at(makeEdgeKey(numV-1-newEdges[e],numV-1-newEdges[e+1])));
+  refreshSideMetadata(ioPath);
 }
 
 // Orients one layer's ring path in place - CCW if ccw is true, CW if false
@@ -592,6 +654,7 @@ bool insertAndRotateToStart(PrintPath &ioPath, double s,
   zVectorArray newNormals = ioPath.normals;
   zFloatArray newTrackIds = ioPath.trackIds;
   zIntArray newFeatures = ioPath.featureFlags;
+  zIntArray newTags=ioPath.edgeFaceTags;
   int startIdx;
 
   const double tEps = weldEps / (std::max)(segLen, 1e-6);
@@ -651,6 +714,7 @@ bool insertAndRotateToStart(PrintPath &ioPath, double s,
     if (hasTrackIds)
       newTrackIds.insert(newTrackIds.begin() + i1, newTrk);
     if (!newFeatures.empty()) newFeatures.insert(newFeatures.begin() + i1, 0);
+    if(!newTags.empty())newTags.insert(newTags.begin()+i1,ioPath.edgeFaceTags[seg]);
     startIdx = i1;
   }
 
@@ -668,6 +732,7 @@ bool insertAndRotateToStart(PrintPath &ioPath, double s,
                 newTrackIds.end());
   if (!newFeatures.empty())
     std::rotate(newFeatures.begin(), newFeatures.begin() + startIdx, newFeatures.end());
+  if(!newTags.empty())std::rotate(newTags.begin(),newTags.begin()+startIdx,newTags.end());
 
   const int newN = static_cast<int>(newPositions.size());
   zIntArray newEdges;
@@ -683,13 +748,14 @@ bool insertAndRotateToStart(PrintPath &ioPath, double s,
   fnGraph.create(newPositions, newEdges);
   ioPath.widths = newWidths;
   ioPath.featureFlags = newFeatures;
+  ioPath.edgeFaceTags=std::move(newTags);
   if (hasHeights)
     ioPath.heights = newHeights;
   if (hasNormals)
     ioPath.normals = newNormals;
   if (hasTrackIds)
     ioPath.trackIds = newTrackIds;
-  return true;
+  return refreshSideMetadata(ioPath);
 }
 
 // Finds the arc-length position of the point on path's closed loop nearest to
@@ -769,6 +835,8 @@ void openLoopAtStart(PrintPath &ioPath) {
 
   fnGraph.clear();
   fnGraph.create(positions, newEdges);
+  if(!ioPath.edgeFaceTags.empty())ioPath.edgeFaceTags.resize(n-1);
+  refreshSideMetadata(ioPath);
 }
 
 // Cuts the closed ring open right before its (already finalized) start
@@ -907,6 +975,7 @@ void cutGapBeforeStart(PrintPath &ioPath, double seamSize) {
   fnGraph.clear();
   fnGraph.create(keptPositions, newEdges);
   ioPath.widths = keptWidths;
+  if(!ioPath.edgeFaceTags.empty())ioPath.edgeFaceTags.resize(keptN-1);
   const auto countFeatures = [](const zIntArray &flags) {
     return std::count_if(flags.begin(), flags.end(), [](int flag) { return flag != 0; });
   };
@@ -921,6 +990,7 @@ void cutGapBeforeStart(PrintPath &ioPath, double seamSize) {
     ioPath.normals = keptNormals;
   if (hasTrackIds)
     ioPath.trackIds = keptTrackIds;
+  refreshSideMetadata(ioPath);
 }
 
 } // namespace
@@ -1056,8 +1126,27 @@ ZSPACE_INLINE bool zPrintSyn::reconstructCorners(PrintPath &path, float angleThr
 }
 
 
-ZSPACE_INLINE zIntArray zPrintSyn::featureVertexIds(const PrintPath &path,float fallbackAngleThreshold) {
-  return cornerVertexIds(path,fallbackAngleThreshold);
+ZSPACE_INLINE zIntArray zPrintSyn::featureVertexIds(const PrintPath &path,float /*fallbackAngleThreshold*/) {
+  zFnGraph fn(const_cast<zObjGraph&>(path.graph));const int n=fn.numVertices();zIntArray edges,result;
+  fn.getEdgeData(edges);
+  if(path.edgeFaceTags.size()!=edges.size()/2 ||
+      (!path.trackIds.empty()&&path.trackIds.size()!=size_t(n)))return result;
+  std::vector<unsigned char> sides(n,0);
+  for(size_t e=0;e<path.edgeFaceTags.size();++e){const int a=edges[2*e],b=edges[2*e+1],tag=path.edgeFaceTags[e];
+    if(a<0||b<0||a>=n||b>=n)return {};
+    if(a==b||tag<3||tag>6)continue;
+    for(int v:{a,b})if(path.trackIds.empty()||path.trackIds[v]>=.5f)sides[v]|=1u<<(tag-3);
+  }
+  for(int v=0;v<n;++v)if(sides[v]&&(sides[v]&(sides[v]-1)))result.push_back(v);
+  return result;
+}
+
+ZSPACE_INLINE bool zPrintSyn::refreshJunctionFeatures(PrintPath &path) {
+  zFnGraph fn(path.graph);const size_t n=size_t(fn.numVertices());
+  if((!path.edgeFaceTags.empty()&&path.edgeFaceTags.size()!=size_t(fn.numEdges())) ||
+      (!path.trackIds.empty()&&path.trackIds.size()!=n))return false;
+  zIntArray flags(n,0);for(int id:featureVertexIds(path,0))flags[id]=PrintPath::OuterJunctionFeature;
+  path.featureFlags=std::move(flags);return true;
 }
 
 
@@ -1117,11 +1206,17 @@ ZSPACE_INLINE bool zPrintSyn::alignStartPointsWith(PrintPathArray &ioPaths,
     outBadLayers->clear();
   const int totalLayers = int(ioPaths.size());
   for (int l = 0; l < totalLayers; ++l) for (const auto &path : ioPaths[l]) {
+    zFnGraph fn(const_cast<zObjGraph&>(path.graph));
     if (!path.featureFlags.empty() && path.featureFlags.size() !=
-        size_t(zFnGraph(const_cast<zObjGraph &>(path.graph)).numVertices())) {
+        size_t(fn.numVertices())) {
       outStatus = "failed: feature count does not match path vertices on layer " + std::to_string(l);
       if (outBadLayers) outBadLayers->push_back(l);
       return false;
+    }
+    if((!path.edgeFaceTags.empty()&&path.edgeFaceTags.size()!=size_t(fn.numEdges())) ||
+        (!path.trackIds.empty()&&path.trackIds.size()!=size_t(fn.numVertices()))){
+      outStatus="failed: edge ownership or track count mismatch on layer "+std::to_string(l);
+      if(outBadLayers)outBadLayers->push_back(l);return false;
     }
   }
   int seedLayer = -1;
@@ -1339,7 +1434,8 @@ ZSPACE_INLINE bool zPrintSyn::resamplePrintPaths(PrintPathArray &ioPaths2D,
     outBadLayers->clear();
   if (!std::isfinite(settings.FeatureAngleTol) || settings.FeatureAngleTol < 0.0f ||
       settings.FeatureAngleTol > 180.0f || !std::isfinite(settings.ResampleLength) ||
-      settings.ResampleLength < zTsField::MinPhysicalParameter) {
+      settings.ResampleLength < zTsField::MinPhysicalParameter ||
+      !std::isfinite(settings.InnerResampleLength)||settings.InnerResampleLength<zTsField::MinPhysicalParameter) {
     outStatus = "failed: invalid feature angle or resample length.";
     return false;
   }
@@ -1361,8 +1457,16 @@ ZSPACE_INLINE bool zPrintSyn::resamplePrintPaths(PrintPathArray &ioPaths2D,
   for (int l = 0; l < totalLayers; l++) {
     try {
       for (auto &path : ioPaths2D[l]) {
-        if (reconstructCorners(path, settings.FeatureAngleTol) &&
-            resampleSinglePath(path, settings.ResampleLength,
+        zFnGraph fn(path.graph);zIntArray edges;fn.getEdgeData(edges);
+        if((!path.edgeFaceTags.empty()&&path.edgeFaceTags.size()!=edges.size()/2)||
+            (!path.trackIds.empty()&&path.trackIds.size()!=size_t(fn.numVertices()))){resampleFailed[l]=1;continue;}
+        bool outer=false;
+        for(size_t e=0;e<path.edgeFaceTags.size();++e){const int tag=path.edgeFaceTags[e];
+          if(tag>=3&&tag<=6&&(path.trackIds.empty()||path.trackIds[edges[2*e]]>=.5f||path.trackIds[edges[2*e+1]]>=.5f))outer=true;
+        }
+        if(!outer)for(int &tag:path.edgeFaceTags)if(tag>=3&&tag<=6)tag=0;
+        if ((outer||reconstructCorners(path,settings.FeatureAngleTol)) &&
+            resampleSinglePath(path, outer?settings.ResampleLength:settings.InnerResampleLength,
                                settings.FeatureAngleTol)) {
           filterGlitches(path);
         } else resampleFailed[l] = 1;
@@ -1381,7 +1485,7 @@ ZSPACE_INLINE bool zPrintSyn::resamplePrintPaths(PrintPathArray &ioPaths2D,
   std::ostringstream out;
   out << "Resampled, glitch-filtered and oriented " << totalPaths
       << " print paths in " << std::fixed << std::setprecision(2) << wallTotalMs
-      << " ms (sampleLen=" << settings.ResampleLength << "mm)";
+      << " ms (outer=" << settings.ResampleLength << "mm, inner="<<settings.InnerResampleLength<<"mm)";
   outStatus = out.str();
 
 
@@ -1609,7 +1713,8 @@ ZSPACE_INLINE bool zPrintSyn::projectPrintPaths(const PrintPathArray &paths2D,
                           const_cast<zObjMesh &>(sections3D[l]),
                           &outPaths3D[l][r].normals, &meshVertexHeights,
                           &outPaths3D[l][r].heights, &reason,
-                          perLayerVertexNormals ? &(*perLayerVertexNormals)[l] : nullptr))) {
+                          perLayerVertexNormals ? &(*perLayerVertexNormals)[l] : nullptr)) ||
+              !refreshJunctionFeatures(outPaths3D[l][r])) {
             remapFailed[l] = 1;
             if (remapErrors[l].empty()) remapErrors[l] = "layer " + std::to_string(l) +
                 ", path " + std::to_string(r) + ": " + reason;
@@ -1768,7 +1873,7 @@ ZSPACE_INLINE bool zPrintSyn::linkPrintPaths(const PrintPathArray &paths3D,
 
   zFnGraph fnOut(outCombined.graph);
   fnOut.create(combinedPositions, combinedEdges);
-  if(!outCombined.faceTagSegments.empty())for(size_t e=0;e<combinedEdges.size();e+=2){
+  if(!combinedEdgeLabels.empty())for(size_t e=0;e<combinedEdges.size();e+=2){
     const auto it=combinedEdgeLabels.find(makeEdgeKey(combinedEdges[e],combinedEdges[e+1]));
     outCombined.edgeFaceTags.push_back(it==combinedEdgeLabels.end()?0:it->second);
   }
@@ -1780,6 +1885,7 @@ ZSPACE_INLINE bool zPrintSyn::linkPrintPaths(const PrintPathArray &paths3D,
     outCombined.normals = combinedNormals;
   if (hasTrackIds)
     outCombined.trackIds = combinedTrackIds;
+  if(!refreshJunctionFeatures(outCombined)){outStatus="failed: invalid linked junction metadata";outCombined=PrintPath();return false;}
 
   outStatus = "Combined " + std::to_string(total) + " print-path vertices" +
       (hasMultiplePaths ? "; disconnected curves retained without travel links." : " into one print path.");
@@ -1838,7 +1944,6 @@ ZSPACE_INLINE bool zPrintSyn::computePipeline(const zObjMeshArray &charts2D,
   const bool tagged=faceTagSources && faceTagSources->size()>=n && std::any_of(faceTagSources->begin(),faceTagSources->begin()+n,[](const auto &s){return !s.edgeTags.empty();});
   if(faceTagSources)zTsUtils::printDebug("[FaceTagSampling] layers="+std::to_string(n)+" sources="+std::to_string(faceTagSources->size())+" enabled="+std::to_string(tagged));
   if(tagged)for(auto &layer:outPaths2D) {
-    for(auto &path:layer)if(!reconstructCorners(path,settings.FeatureAngleTol)){outStatus="Failed FaceTag corner preparation";return false;}
     orientLayer(layer,true);
   }
   if (!tagged && stopAt(resamplePrintPaths(outPaths2D, settings, outStatus, &badLayers, useParallel),

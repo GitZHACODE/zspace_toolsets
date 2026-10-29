@@ -62,6 +62,7 @@ void parity(const zTsField::FaceTagSource &source){
   for(bool split:{false,true}){
     auto before=original,after=original;
     require(face_tag_reference::labelFaceTagSegments(before,source,split),"Reference transition split failed");
+    require(zPrintSyn::refreshJunctionFeatures(before),"Cannot normalize reference junction metadata");
     require(zTsField::labelFaceTagSegments(after,query,split),"Prepared transition split failed");comparePaths(before,after);}
   std::vector<zIntArray> parallel(4);std::vector<std::thread> workers;
   for(int i=0;i<4;++i)workers.emplace_back([&,i]{query.query(points,parallel[i]);});
@@ -154,7 +155,9 @@ void anchorSampling(){
       bool exact=false;for(size_t i=0;i<p.size();++i)if(zTsUtils::vecDistSq(p[i],corner)==0){exact=true;
         require(out.heights[i]==1.25f,"Near transition replaced exact corner attributes");}
       require(exact&&zTsUtils::isClosedGraph(out.graph),"Near transition removed the corner or opened the seam");
-      require(zPrintSyn::featureVertexIds(out,91)==zPrintSyn::cornerVertexIds(out,91),"Features were not re-detected");
+      zIntArray flagged;for(int v=0;v<int(out.featureFlags.size());++v)if(out.featureFlags[v]){
+        require(out.featureFlags[v]==PrintPath::OuterJunctionFeature,"Angle-only support was exported as a feature");flagged.push_back(v);}
+      require(flagged==zPrintSyn::featureVertexIds(out,91)&&flagged==zPrintSyn::featureVertexIds(out,150),"Junction feature selection depends on angle");
       for(size_t e=0;e<edges.size();e+=2)require(zTsUtils::vecDistSq(p[edges[e]],p[edges[e+1]])>=.0001,
         "Chart targets violated 0.01 mm clearance");
       for(int f:out.featureFlags)require(!(f&PrintPath::IntersectionFeature),"Sticky feature mask survived cleanup");
@@ -191,6 +194,113 @@ void anchorSampling(){
   settings.FeatureAngleTol=std::numeric_limits<float>::quiet_NaN();changed={{line}};
   require(!zPrintSyn::resampleFaceTaggedPaths(changed,{source},settings,status),"Nonfinite tagged feature threshold accepted");
 }
+void singleBoundaryTracks(){
+  zObjMeshScalarField grid;zFnMeshScalarField field(grid);field.create(zPoint(-.5f,-.5f,0),zPoint(4.5f,4.5f,0),21,21);
+  const auto source=rectangle(false,false);std::vector<zTsField::FieldSegment> segments;
+  zTsField::loopWidthSegments(source.boundary,source.edgeWidthIds,source.widths,segments);
+  std::vector<zScalarArray> distances;zScalarArray signs,path,tracks,withoutTracks;
+  zTsField::computeSegmentDistances(grid,segments,distances,&signs);
+  zTsField::computePathField(grid,source.boundary,segments,distances,false,0,nullptr,&path,&tracks,nullptr,0,&signs);
+  zTsField::computePathField(grid,source.boundary,segments,distances,false,0,nullptr,&withoutTracks,nullptr,nullptr,0,&signs);
+  require(path==withoutTracks&&!tracks.empty()&&std::all_of(tracks.begin(),tracks.end(),[](double t){return t==1;}),
+    "Single perimeter is not marked outer or track normalization changed geometry");
+  zPointArray ribPoints{{2,0,0},{2,4,0}};zIntArray ribEdge{0,1};zObjGraph rib;zFnGraph(rib).create(ribPoints,ribEdge);
+  segments.emplace_back(rib,1,.4f,.1f,-1);
+  zTsField::computeSegmentDistances(grid,segments,distances,&signs);
+  zTsField::computePathField(grid,source.boundary,segments,distances,false,0,nullptr,&path,&tracks,nullptr,0,&signs);
+  zTsField::computePathField(grid,source.boundary,segments,distances,false,0,nullptr,&withoutTracks,nullptr,nullptr,0,&signs);
+  require(path==withoutTracks&&std::count(tracks.begin(),tracks.end(),0)>0&&std::count(tracks.begin(),tracks.end(),1)>0,
+    "Single-perimeter bracing was incorrectly promoted to outer ownership");
+  segments.erase(segments.begin(),segments.end()-1);zObjGraph noBoundary;
+  zTsField::computeSegmentDistances(grid,segments,distances);
+  zTsField::computePathField(grid,noBoundary,segments,distances,false,0,nullptr,&path,&tracks);
+  require(std::all_of(tracks.begin(),tracks.end(),[](double t){return t==0;}),"Bracing-only contours became outer features");
+}
+void uniformOuterIndependentInner(){
+  require(PrintSynSetting{}.InnerResampleLength==20,"Inner spacing default is not20mm");
+  auto source=rectangle(false,false);zPointArray boundary;zIntArray edges;
+  zFnGraph(source.boundary).getVertexPositions(boundary);zFnGraph(source.boundary).getEdgeData(edges);
+  for(auto &p:boundary){p.x*=10;p.y*=10;}for(auto &w:source.widths)w*=10;
+  zFnGraph(source.boundary).create(boundary,edges);
+  zPointArray outerA{{2,1,0},{2.1f,1.15f,0},{2.4f,1,0},{37.6f,1,0},{37.9f,1.15f,0},{38,1,0}},outerB=outerA;
+  outerB[3].x=35.6f;outerB[4].x=35.9f;outerB[5].x=36;
+  const auto inner=[](float end){auto p=anchorPath({{2,5,0},{10,5,0},{25,5,0},{30,10,0},{30,20,0},{30,end,0}},false);p.trackIds.assign(6,0);return p;};
+  PrintPathArray original{{anchorPath(outerA,false),inner(25)},{anchorPath(outerB,false),inner(38)}};
+  PrintSynSetting settings;settings.ResampleLength=5;settings.FeatureAngleTol=165;
+  PrintPathArray serial=original,parallel=original;std::string a,b;
+  require(zPrintSyn::resampleFaceTaggedPaths(serial,{source,source},settings,a),a);
+  require(zPrintSyn::resampleFaceTaggedPaths(parallel,{source,source},settings,b,nullptr,nullptr,true),b);
+  require(a==b,"Parallel uniform-run budgets differ");size_t outerCount=0;
+  for(size_t l=0;l<serial.size();++l){for(size_t r=0;r<serial[l].size();++r)comparePaths(serial[l][r],parallel[l][r]);
+    const auto &reference=l?outerB:outerA;std::vector<double> arc{0};
+    for(size_t i=1;i<reference.size();++i)arc.push_back(arc.back()+std::sqrt(zTsUtils::vecDistSq(reference[i-1],reference[i])));
+    zPointArray p;zFnGraph(serial[l][0].graph).getVertexPositions(p);
+    if(!l)outerCount=p.size();else require(p.size()==outerCount,"Outer count changed acrosslayers");
+    require(p.size()>4,"Uniform outer fixture has no interior intervals");
+    for(size_t i=0;i<p.size();++i){const double s=arc.back()*i/(p.size()-1);
+      const int k=(std::min)(int(reference.size())-2,(std::max)(0,int(std::upper_bound(arc.begin(),arc.end(),s)-arc.begin())-1));
+      const double t=(s-arc[k])/(arc[k+1]-arc[k]);auto pa=reference[k],pb=reference[k+1];
+      const auto expected=t==0?pa:t==1?pb:pa+(pb-pa)*t;
+      require(zTsUtils::vecDistSq(p[i],expected)<1e-9,"Outer first/last or interior interval is not uniform over its entire run");
+    }
+    const double typical=arc.back()/(p.size()-1);
+    require(std::sqrt(zTsUtils::vecDistSq(p[0],p[1]))>.8*typical&&
+      std::sqrt(zTsUtils::vecDistSq(p[p.size()-2],p.back()))>.8*typical,"Angle supports left tiny terminal outer intervals");
+    zPointArray q;zFnGraph(serial[l][1].graph).getVertexPositions(q);
+    require(q.size()==(l?5u:4u),"Inner20mm was treated as a point count or cross-layer budget");
+    const zPointArray expectedInner=l?zPointArray{{2,5,0},{22,5,0},{30,5,0},{30,25,0},{30,38,0}}:
+      zPointArray{{2,5,0},{22,5,0},{30,5,0},{30,25,0}};
+    for(size_t i=0;i<q.size();++i)require(zTsUtils::vecDistSq(q[i],expectedInner[i])<1e-8,"Inner corner reconstruction or20mm stepping changed");
+    require(serial[l][1].faceTagSegments.empty()&&zPrintSyn::featureVertexIds(serial[l][1],165).empty(),"Inner reconstruction acquired outer ownership");
+  }
+  // Reconstruction may use only supports inside a mixed contour's tag-0 run.
+  // Both shared outer endpoints remain exact, while the private bevel sharpens.
+  auto mixed=anchorPath({{2,1,0},{4,1,0},{6,1,0},{8,1,0},{12,1,0},{18,1,0},
+    {20,3,0},{20,20,0},{20,37,0},{20,39,0},{19,39,0}},false);
+  mixed.trackIds={1,1,1,0,0,0,0,0,0,1,1};PrintPathArray shared{{mixed}};
+  require(zPrintSyn::resampleFaceTaggedPaths(shared,{source},settings,a),a);
+  zPointArray sharedPoints;zFnGraph(shared[0][0].graph).getVertexPositions(sharedPoints);
+  for(const auto &target:zPointArray{{8,1,0},{20,1,0},{20,37,0}}){bool found=false;
+    for(const auto &p:sharedPoints)found|=zTsUtils::vecDistSq(p,target)<1e-10;
+    require(found,"Inner reconstruction moved a shared outer endpoint or missed its private corner");}
+  // A smooth closed inner loop smaller than20mm still needs3 distinct targets.
+  zPointArray circle;for(int i=0;i<64;++i){const double t=i*6.283185307179586/64;circle.emplace_back(20+2*std::cos(t),20+2*std::sin(t),0);}
+  auto loop=anchorPath(circle,true);loop.trackIds.assign(circle.size(),0);PrintPathArray small{{loop}};settings.FeatureAngleTol=0;
+  require(zPrintSyn::resampleFaceTaggedPaths(small,{source},settings,a),a);
+  require(zFnGraph(small[0][0].graph).numVertices()==3&&zTsUtils::isClosedGraph(small[0][0].graph),"Small closed inner contour lost valid topology");
+  // A whole closed single-tag outer piece also needs3 intervals, even when a
+  // longer open piece competes for the same fixed tag budget.
+  auto oneSide=source;oneSide.edgeTags.assign(oneSide.edgeTags.size(),4);
+  auto square=anchorPath({{2,1,0},{6,1,0},{6,5,0},{2,5,0}},true);
+  auto straight=anchorPath({{8,1,0},{38,1,0}},false);PrintPathArray closedOuter{{square,straight}};
+  settings.ResampleLength=20;
+  require(zPrintSyn::resampleFaceTaggedPaths(closedOuter,{oneSide},settings,a),a);
+  require(zFnGraph(closedOuter[0][0].graph).numVertices()==3&&zTsUtils::isClosedGraph(closedOuter[0][0].graph),
+    "Closed outer interval minimum was lost to another piece's allocation");
+  size_t budget=0;for(const auto &p:closedOuter[0])for(const auto &segment:p.faceTagSegments)budget+=segment.vertices.size();
+  require(budget==6,"Closed topology minimum changed endpoint-inclusive tag accounting");
+  // Reconcile competing upper/lower bounds: the long open piece is strongly
+  // compressed in world space (capacity3), while the short closed piece needs3
+  // intervals. The shared budget permits exactly1+3, never3+3.
+  zPointArray cp{{0,0,0},{20,0,0},{40,0,0},{0,40,0},{20,40,0},{40,40,0}},wp=cp;
+  for(auto &p:wp)p.x=p.x<=20?.0035f*p.x:.07f+(p.x-20);
+  zIntArray triCounts(4,3),triangles{0,1,4,0,4,3,1,2,5,1,5,4};zObjMesh chart,section;
+  zFnMesh(chart).create(cp,triCounts,triangles);zFnMesh(section).create(wp,triCounts,triangles);
+  PrintPathArray bounded{{anchorPath({{2,1,0},{12,1,0}},false),anchorPath({{30,1,0},{30.25f,1,0},{30.25f,1.25f,0},{30,1.25f,0}},true)}};
+  const zObjMeshArray charts{chart},sections{section};settings.ResampleLength=4;
+  require(zPrintSyn::resampleFaceTaggedPaths(bounded,{oneSide},settings,a,&charts,&sections),a);
+  budget=0;for(const auto &p:bounded[0])for(const auto &segment:p.faceTagSegments)budget+=segment.vertices.size();
+  require(budget==6&&zFnGraph(bounded[0][0].graph).numVertices()==2&&zFnGraph(bounded[0][1].graph).numVertices()==3,
+    "Competing piece bounds silently changed the fixed interval budget");
+  auto coincident=anchorPath({{10,10,0},{11,10,0},{11,11,0},{10,11,0},{10,10,0}},false);
+  coincident.trackIds.assign(5,0);PrintPathArray collapse{{coincident}};const auto before=collapse;
+  require(!zPrintSyn::resampleFaceTaggedPaths(collapse,{source},settings,a)&&a.find("collapse the print-path topology")!=std::string::npos,
+    "Coincident open endpoints published a one-vertex inner contour");
+  comparePaths(collapse[0][0],before[0][0]);
+  settings.InnerResampleLength=0;auto invalid=original;
+  require(!zPrintSyn::resampleFaceTaggedPaths(invalid,{source,source},settings,a),"Nonpositive inner spacing accepted");
+  for(size_t l=0;l<original.size();++l)for(size_t p=0;p<original[l].size();++p)comparePaths(invalid[l][p],original[l][p]);
+}
 void tieOrder(){
   zTsField::FaceTagSource source;source.widths={.4f};zPointArray points;zIntArray edges;
   for(int i=0;i<24;++i){const float y=i<3?float(1e-7+7e-9*i):float(100+i);
@@ -220,6 +330,6 @@ int main(){try{
   auto source=rectangle(true,true);source.slotWidth=.4f;
   zPointArray slot{{3.7f,1.8f,0},{4.3f,1.8f,0}};zIntArray pair{0,1};zFnGraph(source.slot).create(slot,pair);
   zPointArray rib{{.2f,.5f,0},{3.8f,3.5f,0}};zObjGraph graph;zFnGraph(graph).create(rib,pair);
-  source.bracing.emplace_back(graph,1,.35f,0,.4f);parity(source);tieOrder();snapshots();parallelSampling();anchorSampling();
+  source.bracing.emplace_back(graph,1,.35f,0,.4f);parity(source);tieOrder();snapshots();parallelSampling();anchorSampling();singleBoundaryTracks();uniformOuterIndependentInner();
   std::cout<<"PASS prepared/batched FaceTag parity, transitions, ties, snapshots and concurrent queries\n";return 0;
 }catch(const std::exception &error){std::cerr<<"FAIL "<<error.what()<<"\n";return 1;}}

@@ -52,6 +52,7 @@ void bind_types(py::module_ &m) {
   py::class_<PrintSynSetting>(m, "PrintSynSetting")
       .def(py::init<>())
       .def_readwrite("ResampleLength", &PrintSynSetting::ResampleLength)
+      .def_readwrite("InnerResampleLength", &PrintSynSetting::InnerResampleLength)
       .def_readwrite("FeatureAngleTol", &PrintSynSetting::FeatureAngleTol)
       .def_readwrite("SeamOffset", &PrintSynSetting::SeamOffset)
       .def_readwrite("SeamSize", &PrintSynSetting::SeamSize);

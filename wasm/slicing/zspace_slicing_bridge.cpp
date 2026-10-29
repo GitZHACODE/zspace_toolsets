@@ -150,6 +150,7 @@ void compute(Session& current, const Json& input) {
   settings._HUnrollStart=number(options,"unrollStart",0,0,1);
   auto& post=candidate->getPrintSynSetting();
   post.ResampleLength=number(options,"resampleLength",0.2,0.001,1e6);
+  post.InnerResampleLength=number(options,"innerResampleLength",20.0,0.001,1e6);
   post.FeatureAngleTol=number(options,"featureAngle",90,0,180);
   post.SeamOffset=number(options,"seamOffset",0,-1e6,1e6);
   post.SeamSize=number(options,"seamSize",0,0,1e6);

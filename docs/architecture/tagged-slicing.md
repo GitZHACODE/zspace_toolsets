@@ -66,27 +66,50 @@ operator and invalidates references to its results.
 
 ### Feature targets and resampling
 
-PrintSyn records optional per-vertex `PrintPath::featureFlags`: `AngleFeature`
-(bit 1) and `IntersectionFeature` (bit 2), combinable as a mask. Empty means
-unrecorded; populated masks have one entry per graph vertex, including zero
-for ordinary samples. These C++ masks follow vertex reversal, seam insertion
-and rotation, 3D projection and final linking. Rebuild native consumers when
-updating the public `PrintPath` layout. Existing Python/WASM/USD payloads keep
-their existing fields; the protected target coordinates are part of their
-ordinary path geometry. Packaged runtimes require a separate build/deployment.
+Production features are outer FaceTag junctions: vertices incident to two
+distinct side edge tags from 3 through 6. Actual graph adjacency determines the
+junction, independent of vertex storage order, angle or minimum per-point tag.
+Tag 0, cap tags, slot endpoints and travel edges do not supply a side identity.
+When track metadata exists, a junction must be outer (track 1); a single
+perimeter is outer, while inner/bracing-controlled tracks remain 0.
+`PrintPath::featureFlags` stores `OuterJunctionFeature` (bit 4) or zero at every
+production target. Legacy `AngleFeature` (bit 1) and `IntersectionFeature`
+(bit 2) remain for standalone compatibility but do not select features.
+`featureVertexIds()` retains its angle argument for ABI compatibility and
+ignores it. Reversal, seam operations, labeling, projection and linking refresh
+the flags from surviving edge ownership. The added enum value does not change
+the public `PrintPath` layout. Packaged runtimes require a separate deployment.
 
 `FeatureAngleTol` uses the angle between the two incident edges: straight is
-180 degrees, and a feature has **angle strictly below the threshold**. Equality
-is excluded. Short nonzero edges participate in detection; coincident edges
-cannot define an angle. Open endpoints are mandatory even without a feature bit.
-Corner reconstruction replaces a usable group of angle-selected vertices by
-the incoming/outgoing support-line intersection. Unsupported groups retain
-their original geometry. Reconstruction and sampling refresh angle flags from
-the current geometry; historical angle/intersection masks do not create anchors.
-`featureVertexIds()` likewise re-detects geometric corners at its supplied threshold.
+180 degrees, and an inner reconstruction/support candidate has **angle strictly
+below the threshold**. Equality is excluded. Short nonzero edges participate;
+coincident edges cannot define an angle. Open endpoints remain mandatory.
+Outer runs do not reconstruct corners or insert targets at geometric turns.
+Their dense contour supplies the reference arc for uniformly spaced targets;
+chords between those targets naturally approximate that contour.
+
+Each maximal tag0 run reconstructs independently, using supports only inside
+that run. Its shared endpoints are fixed exactly, so no neighboring outer run
+or junction can move. Inner corners remain ordinary targets, never yellow
+junction features. Pure untagged generic paths use the same inner behavior.
+`InnerResampleLength` is an independent nominal chart-arc distance, **20 mm by
+default**, not a point count. Inner sampling steps by that distance between
+mandatory corners/endpoints, with a terminal residual and 0.01 mm coincidence
+cleanup. Counts can vary across layers. A closed inner contour always needs
+at least three targets; a contour too small for three nominal intervals uses
+bounded uniform subdivisions to preserve that topology.
 
 The `ResampleLength` pass measures arc length in the **2D chart**, in model
-units (normally millimetres). Sampling phase restarts at mandatory targets. A regular
+units (normally millimetres). A shared count is computed for each outer FaceTag
+across layers. Integer intervals are distributed length-proportionally across
+its disconnected pieces, then each entire piece is sampled uniformly including
+both endpoints. Ordinary outer angles never reset that phase; different piece
+lengths and integer rounding can give different spacings between pieces.
+A whole closed single-tag outer piece has a minimum of three intervals; its
+topology minimum participates in the shared budget and allocation bounds.
+This is chart-arc uniformity; changing surface stretch and bent chords can
+produce different final3D chord lengths. Inner sampling phase restarts at its
+mandatory reconstructed corners. A regular
 sample within 0.01 mm of the following geometric corner or endpoint yields to
 that exact point. Consecutive targets closer than 0.01 mm merge, including
 across loop closure; a geometric corner wins over an ordinary seam start.
@@ -99,9 +122,13 @@ equal segment and unique point-label totals across layers; incompatible counts
 fail explicitly. Per-span interval limits redistribute a feasible fixed count
 without discarding generated targets after allocation. Final tagged targets
 are checked for 0.01 mm clearance in both the chart and printable section.
-Intervals near corners/endpoints can differ from the nominal spacing.
+Inner residuals and coincidence cleanup can differ from the nominal spacing.
+USD readers convert both spacing settings into millimetres. Python exposes
+`InnerResampleLength`; the slicing WASM JSON option is `innerResampleLength`.
+The setting is appended to the native structure, so native consumers must be
+rebuilt together even if previous field offsets are unchanged.
 
-After reconstruction, sampling and seam work, mapping preserves the 2D target
+After sampling and seam work, mapping preserves the 2D target
 counts, feature identities and order when producing 3D paths. The production
 pipeline proceeds directly from projection to linking, without a second 3D
 resampling pass. FaceTag budgets therefore remain intact; geometric chart
@@ -117,9 +144,9 @@ Spacing is a target on the pre-pass 3D polyline: projection and feature clearanc
 can change final intervals, so it is not a strict maximum segment length.
 
 Explicit nonzero `SeamSize` still removes the cut arc, including features on
-that arc, and logs the number of removed feature vertices. Surviving vertices
-keep their masks; a newly interpolated seam endpoint has mask zero. Zero-size
-seams open the closing edge without deleting feature targets.
+that arc, and logs the number of removed feature vertices. Surviving edge
+ownership determines the refreshed masks; open endpoints cannot be junctions.
+Zero-size seams remove the closing edge without deleting target coordinates.
 
 ### 2D-to-3D mapping contract and review
 
@@ -237,9 +264,9 @@ ray hit, a local tangent-plane estimate from the closest adjacent point and its
 recovered normal is used and counted. These are geometric spacing estimates,
 not a nozzle-clearance or extrusion optimisation.
 
-Geometric features are detected from the resulting layer charts; PrintSyn
-re-detects them during reconstruction/sampling and carries aligned metadata
-through projection and linking. Relaxation does not move already-generated path targets.
+Outer junction features follow the resulting path's edge ownership. Geometric
+inner turns remain ordinary supports; outer turns do not add targets. PrintSyn carries aligned junction
+metadata through projection and linking. Relaxation does not move already-generated path targets.
 The optional per-section normal tables follow the same ordering contract as the
 per-section height tables; an empty normal table uses the existing face-normal
 mapping. Zero relaxation iterations retains the previous geometry, gradient-based

@@ -15,6 +15,7 @@
 #endif
 
 #include <zspace/zToolsets/fabrication/slicing/utils/Utils.h>
+#include <zspace/zToolsets/fabrication/slicing/printsyn/zPrintSyn.h>
 #include "FieldDistance.h"
 
 #ifndef ZSPACE_INLINE
@@ -1015,8 +1016,12 @@ ZSPACE_INLINE void computePathField(
   zScalarArray discardedPath;
   zScalarArray &path = outPathField ? *outPathField : discardedPath;
   if (boundaries.empty()) {
-    if (!bracing.empty()) path.swap(bracingField);
+    if (!bracing.empty()) {
+      path.swap(bracingField);
+      if(outTrackIdField)outTrackIdField->assign(n,0.0);
+    }
   } else {
+    if(outTrackIdField&&!doubleBoundary)outTrackIdField->assign(n,1.0);
     zScalarArray outer(n), inner, scratch;
     if (doubleBoundary) inner.resize(n);
     for (int i = 0; i < n; ++i) {
@@ -1061,6 +1066,8 @@ ZSPACE_INLINE void computePathField(
         path.swap(outer);
       }
     } else if (!bracing.empty()) {
+      if(outTrackIdField)for(int i=0;i<n;++i)
+        (*outTrackIdField)[i]=outer[i]>=-bracingField[i]?1.0:0.0;
       fnField.boolean_subtract(outer, bracingField, path, false);
     } else {
       path.swap(outer);
@@ -1288,7 +1295,8 @@ ZSPACE_INLINE bool mapPrintPaths(const std::vector<PrintPath> &paths2D,
     auto &path = outPaths3D[i];
     std::string reason;
     if (!remapGraph(path.graph, chart2D, mesh3D, &path.normals,
-                    vertexHeights, &path.heights, &reason, vertexNormals)) {
+                    vertexHeights, &path.heights, &reason, vertexNormals) ||
+        !zPrintSyn::refreshJunctionFeatures(path)) {
       printDebug("[mapPrintPaths] " + (layer >= 0 ? "layer=" + std::to_string(layer) + " " : std::string()) + reason);
       path = PrintPath();
       success = false;

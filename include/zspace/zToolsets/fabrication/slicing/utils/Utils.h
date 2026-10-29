@@ -190,21 +190,23 @@ struct ParameterGraph {
  * zPrintSyn.
  */
 struct PrintPath {
-  enum Feature { AngleFeature = 1, IntersectionFeature = 2 };
+  // Legacy geometric bits remain available to standalone reconstruction users.
+  // Production features are outer FaceTag junctions; no storage-layout change.
+  enum Feature { AngleFeature = 1, IntersectionFeature = 2, OuterJunctionFeature = 4 };
   zObjGraph graph;
   zFloatArray widths;
   zFloatArray heights;
   zVectorArray normals;
   // Per-vertex inner(0)/outer(1) tag, parallel to widths. Populated by
-  // zPrintSyn::extractTrackPaths for a double-layer boundary ring; empty
-  // for a single-perimeter path (no inner/outer distinction).
+  // zPrintSyn::extractTrackPaths for a double-layer boundary ring. A single
+  // perimeter is outer (1); an empty array means no track metadata is supplied.
   zFloatArray trackIds;
   zIntArray faceTags, edgeFaceTags;
   struct FaceTagSegment { int tag=0; zIntArray vertices; };
   std::vector<FaceTagSegment> faceTagSegments;
   // Optional per-vertex bit mask, parallel to graph vertices when populated.
-  // Reconstruction/sampling refreshes angle flags from current geometry;
-  // mapping carries them as metadata. Feature selection re-detects angles.
+  // Production stages refresh OuterJunctionFeature from incident side ownership;
+  // mapping carries aligned metadata. Legacy angle bits do not select features.
   zIntArray featureFlags;
 };
 

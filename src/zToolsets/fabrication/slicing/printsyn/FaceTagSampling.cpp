@@ -30,9 +30,62 @@ struct RegionPath {
 
 constexpr double AnchorClearance = 0.01;
 
-void refreshFeatures(PrintPath &path,float threshold) {
-  path.featureFlags.assign(zFnGraph(path.graph).numVertices(),0);
-  for(int id:zPrintSyn::cornerVertexIds(path,threshold))path.featureFlags[id]=PrintPath::AngleFeature;
+zIntArray geometryAnchors(const PrintPath &path,float threshold) {
+  zIntArray flags(zFnGraph(const_cast<zObjGraph&>(path.graph)).numVertices(),0);
+  for(int id:zPrintSyn::cornerVertexIds(path,threshold))flags[id]=1;
+  return flags;
+}
+
+bool weldProjectedAnchors(PrintPath &path,float threshold,zPointArray &world,
+    zObjMesh *chart,zObjMesh *section);
+
+// A tag-0 run owns its private reconstruction supports. Its endpoints are
+// shared with neighboring outer runs and must remain bit-exact; outer points
+// are never supplied to the reconstruction helper or modified here.
+bool reconstructInnerRun(RegionPath &path,RegionRun &run,float threshold,
+    zObjMesh *chart,zObjMesh *section) {
+  zTsUtils::ScopedSlicingTiming timing("FaceTagSampling.reconstructInnerRun",true);
+  const int first=run.ids.front(),last=run.ids.back();const bool closed=first==last;
+  PrintPath inner;zPointArray points;zIntArray edges;
+  const int count=int(run.ids.size())-(closed?1:0);
+  for(int i=0;i<count;++i){const int id=run.ids[i];points.push_back(path.points[id]);
+    inner.widths.push_back(path.input.widths[id]);
+    if(!path.input.heights.empty())inner.heights.push_back(path.input.heights[id]);
+    if(!path.input.normals.empty())inner.normals.push_back(path.input.normals[id]);
+    if(!path.input.trackIds.empty())inner.trackIds.push_back(path.input.trackIds[id]);
+    if(i){edges.push_back(i-1);edges.push_back(i);}
+  }
+  if(closed){edges.push_back(count-1);edges.push_back(0);}
+  zFnGraph(inner.graph).create(points,edges);
+  if(!zPrintSyn::reconstructCorners(inner,threshold))return false;
+  inner.edgeFaceTags.assign(zFnGraph(inner.graph).numEdges(),0);
+  zPointArray world;if(!weldProjectedAnchors(inner,threshold,world,chart,section))return false;
+  zFnGraph(inner.graph).getVertexPositions(points);
+  if(!closed&&(zTsUtils::vecDistSq(points.front(),path.points[first])!=0 ||
+      zTsUtils::vecDistSq(points.back(),path.points[last])!=0))return false;
+  const auto corners=zPrintSyn::cornerVertexIds(inner,threshold);
+  run.ids.clear();run.arc={0};run.worldArc={0};run.anchors={0};
+  for(int i=0;i<int(points.size());++i){int id;
+    if(!closed&&(i==0||i+1==int(points.size())))id=i==0?first:last;
+    else{id=int(path.points.size());path.points.push_back(points[i]);
+      path.input.widths.push_back(inner.widths[i]);
+      if(!path.input.heights.empty())path.input.heights.push_back(inner.heights[i]);
+      if(!path.input.normals.empty())path.input.normals.push_back(inner.normals[i]);
+      if(!path.input.trackIds.empty())path.input.trackIds.push_back(inner.trackIds[i]);
+      if(!path.world.empty())path.world.push_back(world[i]);
+    }
+    run.ids.push_back(id);
+    if(i&&std::find(corners.begin(),corners.end(),i)!=corners.end())run.anchors.push_back(i);
+  }
+  if(closed)run.ids.push_back(run.ids.front());
+  for(size_t i=1;i<run.ids.size();++i){const int a=run.ids[i-1],b=run.ids[i];
+    const double d=std::sqrt(zTsUtils::vecDistSq(path.points[a],path.points[b]));
+    if(!std::isfinite(d)||d<=0)return false;run.arc.push_back(run.arc.back()+d);
+    run.worldArc.push_back(run.worldArc.back()+(path.world.empty()?d:
+      std::sqrt(zTsUtils::vecDistSq(path.world[a],path.world[b]))));
+  }
+  const int end=int(run.ids.size())-1;if(run.anchors.back()!=end)run.anchors.push_back(end);
+  return true;
 }
 
 // Collapse one contiguous span to an existing exact representative. Keeping
@@ -82,19 +135,20 @@ bool weldProjectedAnchors(PrintPath &path,float threshold,zPointArray &world,
     if(!zTsUtils::graphPolylines(path.graph,curves)||curves.size()!=1)return false;
     const bool closed=curves[0].Closed;const int n=int(points.size()),e=int(path.edgeFaceTags.size());
     if(e!=n-(closed?0:1)||(!world.empty()&&world.size()!=points.size()))return false;
-    refreshFeatures(path,threshold);
+    if(!zPrintSyn::refreshJunctionFeatures(path))return false;
+    const auto geometric=geometryAnchors(path,threshold);
     zIntArray span;int keep=-1;
     // Retain the exact-world weld for chart vertices that map to one point,
     // even when an ordinary vertex separates the protected anchors.
     for(int a=0;a<e;++a){const int b=(a+1)%n;
       if(zTsUtils::vecDistSq(points[a],points[b])<=1e-18 ||
           (!world.empty()&&zTsUtils::vecDistSq(world[a],world[b])<=1e-18)){
-        span={a,b};keep=path.featureFlags[b]&&!path.featureFlags[a]?b:a;break;
+        span={a,b};keep=geometric[b]&&!geometric[a]?b:a;break;
       }
     }
     if(span.empty()) {
       zIntArray anchors;
-      for(int v=0;v<n;++v)if(path.featureFlags[v] || (!closed&&(v==0||v==n-1)) ||
+      for(int v=0;v<n;++v)if(geometric[v] || (!closed&&(v==0||v==n-1)) ||
           (closed?path.edgeFaceTags[(v+e-1)%e]!=path.edgeFaceTags[v]:
             v>0&&v<e&&path.edgeFaceTags[v-1]!=path.edgeFaceTags[v]))anchors.push_back(v);
       const int pairs=int(anchors.size())-(closed?0:1);
@@ -110,7 +164,7 @@ bool weldProjectedAnchors(PrintPath &path,float threshold,zPointArray &world,
         if(chartLength<AnchorClearance || (!world.empty()&&worldLength<AnchorClearance)){
           span=std::move(candidate);
           const bool endA=!closed&&(a==0||a==n-1),endB=!closed&&(b==0||b==n-1);
-          keep=endB&&!endA?b:endA?a:path.featureFlags[b]&&!path.featureFlags[a]?b:a;
+          keep=endB&&!endA?b:endA?a:geometric[b]&&!geometric[a]?b:a;
           break;
         }
       }
@@ -123,39 +177,32 @@ bool weldProjectedAnchors(PrintPath &path,float threshold,zPointArray &world,
 // Integer intervals with a lower bound of one per protected span. Remaining
 // rounding units go to largest remainders, with stable source-order ties.
 std::vector<int> allocateIntervals(const std::vector<double> &lengths, int budget,
-    const std::vector<int> &capacities) {
+    const std::vector<int> &capacities,const std::vector<int> &minima) {
   zTsUtils::ScopedSlicingTiming methodTiming("FaceTagSampling.allocateIntervals", true);
   const int n=int(lengths.size());
-  if(budget<n) throw std::runtime_error("FaceTag budget cannot preserve anchors");
-  if(std::any_of(capacities.begin(),capacities.end(),[](int n){return n<1;}) ||
-      std::accumulate(capacities.begin(),capacities.end(),int64_t(0))<budget)
+  if(budget<std::accumulate(minima.begin(),minima.end(),int64_t(0)))throw std::runtime_error("FaceTag budget cannot preserve piece topology");
+  bool invalid=false;for(int i=0;i<n;++i)invalid|=capacities[i]<minima[i];
+  if(invalid || std::accumulate(capacities.begin(),capacities.end(),int64_t(0))<budget)
     throw std::runtime_error("FaceTag fixed count cannot fit with 0.01 mm target clearance");
-  std::vector<int> result(n,0); std::vector<double> quota(n);
-  int remaining=budget; double length=std::accumulate(lengths.begin(),lengths.end(),0.0);
-  bool changed=true;
-  while(changed) {
-    changed=false;
-    // Saturate upper bounds first. Doing a lower bound first could strand
-    // budget that should move to that span after a different span saturates.
-    for(int i=0;i<n;++i) if(!result[i] && remaining*lengths[i]/length>capacities[i]) {
-      result[i]=capacities[i];
-      remaining-=result[i]; length-=lengths[i]; changed=true;
-    }
-    if(changed)continue;
-    for(int i=0;i<n;++i) if(!result[i] && remaining*lengths[i]/length<1) {
-      result[i]=1;--remaining;length-=lengths[i];changed=true;
-    }
+  // Find one proportional scale with ALL lower/upper bounds active together.
+  // Sequentially locking an upper bound before a larger minimum can otherwise
+  // over-allocate the fixed budget despite a feasible bounded solution.
+  double low=0,high=0;
+  for(int i=0;i<n;++i){if(!std::isfinite(lengths[i])||lengths[i]<=0)throw std::runtime_error("Invalid FaceTag piece length");
+    high=(std::max)(high,double(capacities[i])/lengths[i]);}
+  for(int iteration=0;iteration<80;++iteration){const double scale=low+.5*(high-low);double total=0;
+    for(int i=0;i<n;++i)total+=std::clamp(scale*lengths[i],double(minima[i]),double(capacities[i]));
+    if(total<=budget)low=scale;else high=scale;
   }
-  std::vector<int> order;
-  for(int i=0;i<n;++i) if(!result[i]) {
-    quota[i]=remaining*lengths[i]/length; order.push_back(i);
-  }
-  int used=0;
-  for(int i:order) { result[i]=int(std::floor(quota[i])); used+=result[i]; }
+  std::vector<int> result(n),order;std::vector<double> quota(n);int used=0;
+  for(int i=0;i<n;++i){quota[i]=std::clamp(low*lengths[i],double(minima[i]),double(capacities[i]));
+    result[i]=int(std::floor(quota[i]));used+=result[i];if(result[i]<capacities[i])order.push_back(i);}
   std::stable_sort(order.begin(),order.end(),[&](int a,int b){
     return quota[a]-std::floor(quota[a]) > quota[b]-std::floor(quota[b]);
   });
-  for(int i=0;i<remaining-used;++i) ++result[order.at(i)];
+  for(int i=0;i<budget-used;++i) ++result[order.at(i)];
+  for(int i=0;i<n;++i)if(result[i]<minima[i]||result[i]>capacities[i])throw std::runtime_error("FaceTag allocation exceeded piece bounds");
+  if(std::accumulate(result.begin(),result.end(),int64_t(0))!=budget)throw std::runtime_error("FaceTag allocation changed its fixed interval budget");
   return result;
 }
 }
@@ -175,6 +222,7 @@ bool zPrintSyn::resampleFaceTaggedPaths(PrintPathArray &paths,
   try {
     if(paths.empty() || paths.size()>sources.size() ||
         !std::isfinite(settings.ResampleLength) || settings.ResampleLength<zTsField::MinPhysicalParameter ||
+        !std::isfinite(settings.InnerResampleLength) || settings.InnerResampleLength<zTsField::MinPhysicalParameter ||
         !std::isfinite(settings.FeatureAngleTol) || settings.FeatureAngleTol<0 || settings.FeatureAngleTol>180)
       throw std::runtime_error("Invalid FaceTag layers or sampling distance");
     std::vector<std::vector<RegionPath>> prepared(paths.size());
@@ -198,8 +246,15 @@ bool zPrintSyn::resampleFaceTaggedPaths(PrintPathArray &paths,
         zTsUtils::ScopedSlicingTiming prepareTiming("FaceTagSampling.preparePath", true);
         if(!path.featureFlags.empty()&&path.featureFlags.size()!=size_t(zFnGraph(path.graph).numVertices()))
           throw std::runtime_error("Invalid FaceTag feature metadata");
-        refreshFeatures(path,settings.FeatureAngleTol);
+        // Geometry supports remain mandatory for sampling/float snapping, but
+        // they are not exported or displayed as fabrication features.
+        path.featureFlags=geometryAnchors(path,settings.FeatureAngleTol);
         if(!zTsField::labelFaceTagSegments(path,query)) throw std::runtime_error("Cannot label FaceTag contour");
+        if(!path.trackIds.empty()){
+          zIntArray edges;zFnGraph(path.graph).getEdgeData(edges);
+          for(size_t e=0;e<path.edgeFaceTags.size();++e)if(path.trackIds[edges[2*e]]<.5f&&path.trackIds[edges[2*e+1]]<.5f)
+            path.edgeFaceTags[e]=0;
+        }
         RegionPath p; p.input=std::move(path);
         if(!weldProjectedAnchors(p.input,settings.FeatureAngleTol,p.world,
             charts2D&&sections3D?&const_cast<zObjMesh&>(charts2D->at(l)):nullptr,
@@ -212,7 +267,6 @@ bool zPrintSyn::resampleFaceTaggedPaths(PrintPathArray &paths,
         p.closed=curves.front().Closed;
         const int n=int(p.points.size()), e=int(p.input.edgeFaceTags.size());
         if(e!=n-(p.closed?0:1)) throw std::runtime_error("FaceTag connectivity mismatch");
-        auto corners=cornerVertexIds(p.input,settings.FeatureAngleTol);
         int start=0;
         if(p.closed) for(int i=0;i<e;++i) if(p.input.edgeFaceTags[i]!=p.input.edgeFaceTags[(i+e-1)%e]) { start=i; break; }
         for(int k=0;k<e;++k) {
@@ -227,12 +281,15 @@ bool zPrintSyn::resampleFaceTaggedPaths(PrintPathArray &paths,
           r.ids.push_back(b);r.arc.push_back(r.arc.back()+d);
           r.worldArc.push_back(r.worldArc.back()+(p.world.empty()?d:
             std::sqrt(zTsUtils::vecDistSq(p.world[a],p.world[b]))));
-          if(std::find(corners.begin(),corners.end(),b)!=corners.end()) r.anchors.push_back(int(r.ids.size())-1);
         }
         for(auto &r:p.runs) {
           const int end=int(r.ids.size())-1;
           if(r.anchors.back()!=end) r.anchors.push_back(end);
-          if(r.tag) { lengths[l][r.tag]+=r.length(); ++pieces[l][r.tag]; spans[l][r.tag]+=int(r.anchors.size())-1; }
+          if(!r.tag&&!reconstructInnerRun(p,r,settings.FeatureAngleTol,
+              charts2D&&sections3D?&const_cast<zObjMesh&>(charts2D->at(l)):nullptr,
+              charts2D&&sections3D?&const_cast<zObjMesh&>(sections3D->at(l)):nullptr))
+            throw std::runtime_error("Cannot reconstruct an inner run without moving its outer junction endpoints");
+          if(r.tag) { lengths[l][r.tag]+=r.length(); ++pieces[l][r.tag]; spans[l][r.tag]+=p.closed&&p.runs.size()==1?3:1; }
         }
         prepared[l].push_back(std::move(p));
       }
@@ -251,7 +308,6 @@ bool zPrintSyn::resampleFaceTaggedPaths(PrintPathArray &paths,
     // order is unchanged, so floating-point means and rounded counts are exact.
     std::map<int,int> budgets;
     for(size_t l=0;l<paths.size();++l)for(const auto &entry:lengths[l])budgets.emplace(entry.first,0);
-    if(budgets.empty()) throw std::runtime_error("No outer FaceTag segments were found");
     for(auto &entry:budgets) {
       zTsUtils::ScopedSlicingTiming budgetTiming("FaceTagSampling.computeTagBudget", true);
       const int tag=entry.first;double mean=0;int maxPieces=0,minimum=0;
@@ -270,17 +326,28 @@ bool zPrintSyn::resampleFaceTaggedPaths(PrintPathArray &paths,
       zTsUtils::ScopedSlicingTiming samplingTiming("FaceTagSampling.sampleLayer", true);
       std::map<int,std::vector<double>> spanLengths;
       std::map<int,std::vector<int>> spanCapacities;
+      std::map<int,std::vector<int>> spanMinima;
       for(const auto &p:prepared[l]) for(const auto &r:p.runs) if(r.tag)
         for(size_t a=1;a<r.anchors.size();++a) {
           spanLengths[r.tag].push_back(r.arc[r.anchors[a]]-r.arc[r.anchors[a-1]]);
           const double physical=(std::min)(spanLengths[r.tag].back(),
             r.worldArc[r.anchors[a]]-r.worldArc[r.anchors[a-1]]);
           spanCapacities[r.tag].push_back(int((std::min)(2000000.0,std::floor(physical/AnchorClearance))));
+          spanMinima[r.tag].push_back(p.closed&&p.runs.size()==1?3:1);
         }
       std::map<int,std::vector<int>> counts;std::map<int,size_t> cursors;
-      for(const auto &b:budgets) counts[b.first]=allocateIntervals(spanLengths[b.first],b.second-pieces[l][b.first],spanCapacities[b.first]);
+      for(const auto &b:budgets) counts[b.first]=allocateIntervals(spanLengths[b.first],b.second-pieces[l][b.first],spanCapacities[b.first],spanMinima[b.first]);
       for(const auto &p:prepared[l]) {
         PrintPath out;zPointArray points;zIntArray edges;
+        const auto nearInnerEnd=[&](const RegionRun &r,double arc,double end){
+          const auto at=[&](const zPointArray &positions,double s){
+            const int k=(std::min)(int(r.ids.size())-2,(std::max)(0,int(std::upper_bound(r.arc.begin(),r.arc.end(),s)-r.arc.begin())-1));
+            const int a=r.ids[k],b=r.ids[k+1];const double t=std::clamp((s-r.arc[k])/(r.arc[k+1]-r.arc[k]),0.0,1.0);
+            auto pa=positions[a],pb=positions[b];return t==0?pa:t==1?pb:pa+(pb-pa)*t;
+          };
+          return zTsUtils::vecDistSq(at(p.points,arc),at(p.points,end))<AnchorClearance*AnchorClearance ||
+            (!p.world.empty()&&zTsUtils::vecDistSq(at(p.world,arc),at(p.world,end))<AnchorClearance*AnchorClearance);
+        };
         const auto append=[&](const RegionRun &r,double arc) {
           auto it=std::upper_bound(r.arc.begin(),r.arc.end(),arc);
           const int k=(std::min)(int(r.ids.size())-2,(std::max)(0,int(it-r.arc.begin())-1));
@@ -301,16 +368,32 @@ bool zPrintSyn::resampleFaceTaggedPaths(PrintPathArray &paths,
           return id;
         };
         for(const auto &r:p.runs) {
+          std::vector<int> innerCounts;std::vector<bool> innerUniform;
+          if(!r.tag){std::vector<double> lengths;uint64_t total=0;
+            for(size_t a=1;a<r.anchors.size();++a){const double length=r.arc[r.anchors[a]]-r.arc[r.anchors[a-1]];
+              const double count=std::ceil(length/settings.InnerResampleLength);
+              if(count>2000000)throw std::runtime_error("Inner sample budget exceeds 2000000 points");
+              innerCounts.push_back((std::max)(1,int(count)));lengths.push_back(length);total+=innerCounts.back();
+            }
+            innerUniform.assign(innerCounts.size(),false);
+            // A closed contour needs at least three distinct targets even when
+            // its perimeter is below the nominal inner spacing. Only this
+            // topology minimum subdivides a span instead of stepping by20mm.
+            if(p.closed&&p.runs.size()==1)while(total<3){
+              const size_t i=std::max_element(lengths.begin(),lengths.end())-lengths.begin();
+              ++innerCounts[i];innerUniform[i]=true;++total;
+            }
+          }
           PrintPath::FaceTagSegment segment;segment.tag=r.tag;
           int previous=append(r,0);segment.vertices.push_back(previous);
           for(size_t a=1;a<r.anchors.size();++a) {
             const double lo=r.arc[r.anchors[a-1]],hi=r.arc[r.anchors[a]];
-            const double physical=(std::min)(hi-lo,r.worldArc[r.anchors[a]]-r.worldArc[r.anchors[a-1]]);
-            const int capacity=(std::max)(1,int((std::min)(2000000.0,std::floor(physical/AnchorClearance))));
-            const int count=r.tag ? counts[r.tag].at(cursors[r.tag]++) :
-                (std::min)(capacity,(std::max)(1,int(std::ceil((hi-lo)/settings.ResampleLength))));
+            const int count=r.tag ? counts[r.tag].at(cursors[r.tag]++) :innerCounts[a-1];
             for(int j=1;j<=count;++j) {
-              const double sampleArc=j==count?hi:lo+(hi-lo)*j/count;
+              const double sampleArc=j==count?hi:(r.tag||innerUniform[a-1])?lo+(hi-lo)*j/count:lo+settings.InnerResampleLength*j;
+              // Independent inner stepping may leave a short terminal residual;
+              // let the exact endpoint own the 0.01 mm coincidence neighborhood.
+              if(!r.tag&&j<count&&nearInnerEnd(r,sampleArc,hi))continue;
               const int next=append(r,sampleArc);
               if(next==previous) {
                 if(!r.tag) continue; // Float rounding can coalesce a final regular sample with its endpoint.
@@ -325,6 +408,8 @@ bool zPrintSyn::resampleFaceTaggedPaths(PrintPathArray &paths,
             out.faceTagSegments.push_back(std::move(segment));
           }
         }
+        if(points.size()<(p.closed?3u:2u)||edges.size()<(p.closed?6u:2u))
+          throw std::runtime_error("Sampling would collapse the print-path topology on layer "+std::to_string(l));
         zFnGraph(out.graph).create(points,edges);
         {
           zTsUtils::ScopedSlicingTiming clearanceTiming("FaceTagSampling.validateClearance",true);
@@ -339,7 +424,7 @@ bool zPrintSyn::resampleFaceTaggedPaths(PrintPathArray &paths,
               (!world.empty()&&zTsUtils::vecDistSq(world[edges[e]],world[edges[e+1]])<AnchorClearance*AnchorClearance))
             throw std::runtime_error("FaceTag fixed count cannot preserve 0.01 mm target clearance on layer "+std::to_string(l));
         }
-        refreshFeatures(out,settings.FeatureAngleTol);
+        if(!zPrintSyn::refreshJunctionFeatures(out))throw std::runtime_error("Invalid sampled junction metadata");
         result[l].push_back(std::move(out));
       }
     }

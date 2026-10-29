@@ -1,4 +1,5 @@
 #include <zspace/zToolsets/fabrication/slicing/utils/Utils.h>
+#include <zspace/zToolsets/fabrication/slicing/printsyn/zPrintSyn.h>
 #include <zspace/zToolsets/fabrication/slicing/utils/Parallel.h>
 #include "FieldDistance.h"
 #include <algorithm>
@@ -281,7 +282,9 @@ bool labelFaceTagSegments(PrintPath &path,const FaceTagQuery &query,bool splitTr
     result.edgeFaceTags.push_back(tag);
     for(int v:{a,b}) if(tag && (!result.faceTags[v] || tag<result.faceTags[v])) result.faceTags[v]=tag;
   }
-  zFnGraph(result.graph).create(output,connects); path=std::move(result); return true;
+  zFnGraph(result.graph).create(output,connects);
+  if(!zPrintSyn::refreshJunctionFeatures(result))return false;
+  path=std::move(result); return true;
 }
 
 

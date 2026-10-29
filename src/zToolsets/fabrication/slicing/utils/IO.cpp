@@ -486,8 +486,13 @@ ZSPACE_INLINE bool readSlicerInputUSD(const std::string &filePath, SlicerUSDInpu
     };
     for (const char *key : {"BoundaryWidth", "BracingWidth", "BracingCurveWidths", "OverlapWidth", "FieldCellSize", "LayerSpacing"})
       scaleSetting("slicer", key);
-    for (const char *key : {"ResampleLength", "SurfaceChordTolerance", "SeamOffset", "SeamSize"})
+    for (const char *key : {"ResampleLength", "InnerResampleLength", "SurfaceChordTolerance", "SeamOffset", "SeamSize"})
       scaleSetting("printSyn", key);
+    if(settings["printSyn"].contains("InnerResampleLength")){
+      const auto &value=settings["printSyn"]["InnerResampleLength"];
+      if(!value.is_number()||!std::isfinite(value.get<double>())||value.get<double>()<=0)
+        throw std::runtime_error("InnerResampleLength must be a finite positive length.");
+    }
     out.SettingsJSON = settings.dump();
     const auto data = stage->GetPrimAtPath(pxr::SdfPath("/Slicer_data"));
     if (!data || !data.IsA<pxr::UsdGeomScope>())

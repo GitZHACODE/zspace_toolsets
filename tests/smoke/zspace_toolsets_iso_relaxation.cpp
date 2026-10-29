@@ -76,7 +76,7 @@ void relaxation() {
   require(zPrintSyn::computePipeline(charts,surfaces,nullptr,zPrintSyn::SeamMapping::WorldNearest,ps,paths2D,projected,combined,error,false,&heights,&n),error);
   zPointArray points;zFnGraph(combined.graph).getVertexPositions(points);
   for(int f=0;f<4;++f){bool found=false;for(size_t i=0;i<points.size();++i)if(norm(points[i],middle.Positions[ids[f]])<3e-6){
-      found=true;require(combined.featureFlags[i]==PrintPath::AngleFeature,"Geometric corner flags were not refreshed");
+      found=true;require(combined.featureFlags[i]==0,"An angle-only sampling support became a junction feature");
       require(norm(combined.normals[i],middle.Normals[ids[f]])<3e-6,"Projection replaced recovered normal with a face normal");}
     require(found,"Resampling or 3D projection lost a mandatory feature target");}
   const auto rejectNormals=[&](){require(!zPrintSyn::projectPrintPaths(paths2D,charts,surfaces,nullptr,projected,error,nullptr,false,&heights,&n),
